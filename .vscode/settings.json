@@ -1,6 +1,8 @@
 {
     "rust-analyzer.linkedProjects": [
-        "./tc-egress/tc-egress-ebpf/Cargo.toml",
-        "./tc-egress/tc-egress-ebpf/Cargo.toml"
+        "./sprayer/sprayer/Cargo.toml",
+        "./sprayer/tc-egress-ebpf/Cargo.toml",
+        "./sprayer/xdp-ingress-ebpf/Cargo.toml",
+        "./server/Cargo.toml"
     ]
 }

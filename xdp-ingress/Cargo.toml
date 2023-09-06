@@ -1,2 +1,0 @@
-[workspace]
-members = ["xtask", "xdp-ingress", "xdp-ingress-common"]

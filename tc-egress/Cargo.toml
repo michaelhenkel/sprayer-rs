@@ -1,3 +1,0 @@
-[workspace]
-members = ["xtask", "tc-egress", "tc-egress-common"]
-resolver = "2"

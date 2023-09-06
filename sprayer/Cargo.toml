@@ -1,0 +1,3 @@
+[workspace]
+members = ["xtask", "sprayer", "common","xdp-ingress-common"]
+resolver = "2"

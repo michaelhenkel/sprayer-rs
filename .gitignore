@@ -1,1 +1,4 @@
 /target
+/tc-egress/target
+/xdp-ingress/target
+/udp-server/target
