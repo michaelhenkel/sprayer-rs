@@ -1,0 +1,12 @@
+/Users/mhenkel/sprayer-rs/udp-server/target/debug/deps/anstyle-9d2810adad2494ca.rmeta: /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/lib.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/macros.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/color.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/effect.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/reset.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/style.rs
+
+/Users/mhenkel/sprayer-rs/udp-server/target/debug/deps/libanstyle-9d2810adad2494ca.rlib: /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/lib.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/macros.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/color.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/effect.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/reset.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/style.rs
+
+/Users/mhenkel/sprayer-rs/udp-server/target/debug/deps/anstyle-9d2810adad2494ca.d: /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/lib.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/macros.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/color.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/effect.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/reset.rs /Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/style.rs
+
+/Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/lib.rs:
+/Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/macros.rs:
+/Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/color.rs:
+/Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/effect.rs:
+/Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/reset.rs:
+/Users/mhenkel/.cargo/registry/src/index.crates.io-6f17d22bba15001f/anstyle-1.0.2/src/style.rs:

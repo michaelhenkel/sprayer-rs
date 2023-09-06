@@ -1,0 +1,4 @@
+ARCH=aarch64
+cargo xtask build-ebpf --release
+RUSTFLAGS="-Clinker=${ARCH}-linux-musl-ld" cargo build --release --target=${ARCH}-unknown-linux-musl
+
