@@ -2,9 +2,9 @@
 #![no_main]
 
 use aya_bpf::{
-    bindings::xdp_action,
+    bindings::{xdp_action, self},
     macros::xdp,
-    helpers::bpf_xdp_adjust_head,
+    helpers::{bpf_xdp_adjust_head, bpf_fib_lookup, bpf_redirect},
     programs::XdpContext,
 };
 use aya_log_ebpf::info;
@@ -12,36 +12,34 @@ use network_types::{
     eth::{EthHdr, EtherType},
     ip::{Ipv4Hdr, IpProto},
     udp::UdpHdr,
+
 };
-use core::mem;
+use core::mem::{self, MaybeUninit};
+use core::mem::{size_of, zeroed};
+use aya_bpf::cty::c_void;
 
 #[xdp]
-pub fn xdp_ingress(ctx: XdpContext) -> u32 {
-    match try_xdp_ingress(ctx) {
+pub fn xdp_dummy(ctx: XdpContext) -> u32 {
+    match try_xdp_dummy(ctx) {
         Ok(ret) => ret,
         Err(_) => xdp_action::XDP_ABORTED,
     }
 }
 
-fn try_xdp_ingress(ctx: XdpContext) -> Result<u32, u32> {
-    let eth = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
-    if unsafe{ (*eth).ether_type } != EtherType::Ipv4 {
-        return Ok(xdp_action::XDP_PASS);
-    }
-    let ip = ptr_at_mut::<Ipv4Hdr>(&ctx, EthHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
-    if unsafe { (*ip).proto } != IpProto::Udp {
-        return Ok(xdp_action::XDP_PASS);
-    }
-    let udp = ptr_at_mut::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(xdp_action::XDP_PASS)?;
-    if unsafe { u16::from_be((*udp).dest) } == 3000 {
-        unsafe { bpf_xdp_adjust_head(ctx.ctx, (EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as i32)};
-    }
+fn try_xdp_dummy(ctx: XdpContext) -> Result<u32, u32> {
+    info!(&ctx, "xdp_dummy");
     Ok(xdp_action::XDP_PASS)
 }
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     unsafe { core::hint::unreachable_unchecked() }
+}
+
+#[inline(always)]
+fn uninit<T>() -> *mut T {
+    let mut v: MaybeUninit<T> = MaybeUninit::uninit();
+    v.as_mut_ptr() as *mut T
 }
 
 #[inline(always)]

@@ -1,16 +1,16 @@
 [package]
-name = "xdp-ingress-ebpf"
+name = "xdp-dummy-ebpf"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 aya-bpf = { git = "https://github.com/aya-rs/aya" }
 aya-log-ebpf = { git = "https://github.com/aya-rs/aya" }
-xdp-ingress-common = { path = "../xdp-ingress-common" }
 network-types = "0.0.4"
+libc = "0.2"
 
 [[bin]]
-name = "xdp-ingress"
+name = "xdp-dummy"
 path = "src/main.rs"
 
 [profile.dev]

@@ -38,7 +38,8 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
 }
 
 fn try_tc_egress(mut ctx: TcContext) -> Result<i32, ()> {
-    /* 
+    info!(&ctx, "tc_egress");
+     
     let links = match unsafe { LINKS.get(&0) } {
         Some(links) => {
             links
@@ -66,9 +67,6 @@ fn try_tc_egress(mut ctx: TcContext) -> Result<i32, ()> {
             return Ok(TC_ACT_PIPE)
         }
     };
-    */
-    
-
 
     let ethhdr: EthHdr = match ctx.load(0).map_err(|_| ()){
         Ok(hdr) => {
@@ -89,6 +87,7 @@ fn try_tc_egress(mut ctx: TcContext) -> Result<i32, ()> {
                 }
             };
             let ip_tot_len = u16::from_be(ip_hdr.tot_len) + (EthHdr::LEN  + Ipv4Hdr::LEN + UdpHdr::LEN) as u16;
+             
             ip_hdr.tot_len = u16::to_be(ip_tot_len);
             ip_hdr.proto = IpProto::Udp;
             
@@ -99,6 +98,7 @@ fn try_tc_egress(mut ctx: TcContext) -> Result<i32, ()> {
             
             modify_context(&mut ctx, ip_hdr)?;
             
+            
             (Ipv4Hdr::LEN, ip_tot_len - Ipv4Hdr::LEN as u16)
         },
         _ => {
@@ -106,7 +106,7 @@ fn try_tc_egress(mut ctx: TcContext) -> Result<i32, ()> {
         }
     };
 
-    
+     
     match ctx.store(0, &ethhdr, 0){
         Ok(_) => {},
         Err(_) => {
@@ -122,16 +122,14 @@ fn try_tc_egress(mut ctx: TcContext) -> Result<i32, ()> {
         check: 0,
     };
     
- 
+     
     match ctx.store(EthHdr::LEN + ip_proto_len, &outer_udp_hdr, 0){
         Ok(_) => {},
         Err(_) => {
             return Ok(TC_ACT_PIPE)
         }
     };
-    
 
-    /*
     let mut new_counter = counter.clone() + 1;
     if new_counter == *links {
         new_counter = 0;
@@ -144,8 +142,6 @@ fn try_tc_egress(mut ctx: TcContext) -> Result<i32, ()> {
             return Ok(TC_ACT_PIPE)
         }
     }
-    */
-    
     
     Ok(TC_ACT_PIPE)
 }

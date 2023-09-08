@@ -1,24 +1,61 @@
-sudo ip link del dev ns1-veth0 || true
-sudo ip link del dev ns2-veth0 || true
-sudo ip netns del ns1 || true
-sudo ip netns del ns2 || true
-sudo ip link del br0 || true
+sudo ip link add name fabric type bridge
+sudo ip link set dev fabric up
 
-sudo ip netns add ns1
-sudo ip link add name ns1-veth0 type veth peer name ns1-veth1
-sudo ip link set ns1-veth1 netns ns1
-sudo ip link set ns1-veth0 up
-sudo ip netns exec ns1 ip address add 10.0.0.1/24 dev ns1-veth1
-sudo ip netns exec ns1 ip link set ns1-veth1 up
+host=host1
+sudo ip link add name ${host} type bridge
+sudo ip link set dev ${host} up
+sudo ip link add name ${host}-phy type veth peer name ${host}-fab
+sudo ip link set dev ${host}-fab up
+sudo ip link set dev ${host}-phy up
+sudo ip link set dev ${host}-fab master fabric
+sudo ip link set dev ${host}-phy master ${host}
+sudo ip link set dev ${host}-fab mtu 3000
+sudo ip link set dev ${host}-phy mtu 3000
 
-sudo ip netns add ns2
-sudo ip link add name ns2-veth0 type veth peer name ns2-veth1
-sudo ip link set ns2-veth1 netns ns2
-sudo ip link set ns2-veth0 up
-sudo ip netns exec ns2 ip address add 10.0.0.2/24 dev ns2-veth1
-sudo ip netns exec ns2 ip link set ns2-veth1 up
+ns=ns1
+ip=10.0.0.1/24
+sudo ip netns add ${ns}
+sudo ip link add name ${ns} type veth peer name ${host}-${ns}
+sudo ip link set ${ns} netns ${ns}
+sudo ip link set ${host}-${ns} up
+sudo ip netns exec ${ns} ip link set ${ns} up
+sudo ip netns exec ${ns} ip addr add ${ip} dev ${ns}
+sudo ip link set dev ${host}-${ns} master ${host}
+sudo ip netns exec ${ns} ip route change 10.0.0.0/24 dev ns1 proto kernel scope link src ${ip} advmss 2900
 
-sudo ip link add name br0 type bridge
-sudo ip link set dev ns1-veth0 master br0
-sudo ip link set dev ns2-veth0 master br0
-sudo ip link set dev br0 up
+
+host=host2
+sudo ip link add name ${host} type bridge
+sudo ip link set dev ${host} up
+sudo ip link add name ${host}-phy type veth peer name ${host}-fab
+sudo ip link set dev ${host}-fab up
+sudo ip link set dev ${host}-phy up
+sudo ip link set dev ${host}-fab master fabric
+sudo ip link set dev ${host}-phy master ${host}
+sudo ip link set dev ${host}-fab mtu 3000
+sudo ip link set dev ${host}-phy mtu 3000
+
+ns=ns2
+ip=10.0.0.2/24
+sudo ip netns add ${ns}
+sudo ip link add name ${ns} type veth peer name ${host}-${ns}
+sudo ip link set ${ns} netns ${ns}
+sudo ip link set ${host}-${ns} up
+sudo ip netns exec ${ns} ip link set ${ns} up
+sudo ip netns exec ${ns} ip addr add ${ip} dev ${ns}
+sudo ip link set dev ${host}-${ns} master ${host}
+sudo ip netns exec ${ns} ip route change 10.0.0.0/24 dev ns1 proto kernel scope link src ${ip} advmss 2900
+
+
+sudo ip netns del ns1 
+sudo ip netns del ns2
+sudo ip link del host1
+sudo ip link del host2
+sudo ip link del host1-phy
+sudo ip link del host2-phy
+sudo ip link del fabric
+
+
+bpftrace -e \
+'tracepoint:xdp:xdp_redirect*_err {@redir_errno[-args->err] = count();}
+tracepoint:xdp:xdp_devmap_xmit {@devmap_errno[-args->err] = count();}'

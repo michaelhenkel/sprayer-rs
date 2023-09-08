@@ -40,8 +40,13 @@ pub struct Options {
 }
 
 pub fn build_ebpf(opts: Options) -> Result<(), anyhow::Error> {
-    let tc_dir = PathBuf::from("tc-egress-ebpf");
-    let xdp_dir = PathBuf::from("xdp-ingress-ebpf");
+
+    //let tc_dir = PathBuf::from("tc-egress-ebpf");
+    //let xdp_dir = PathBuf::from("xdp-ingress-ebpf");
+    let xdp_encap_dir = PathBuf::from("xdp-encap-ebpf");
+    let xdp_decap_dir = PathBuf::from("xdp-decap-ebpf");
+    let xdp_dummy_dir = PathBuf::from("xdp-dummy-ebpf");
+
     let target = format!("--target={}", opts.target);
     let mut args = vec![
         "build",
@@ -58,6 +63,7 @@ pub fn build_ebpf(opts: Options) -> Result<(), anyhow::Error> {
     // vars set by the cargo xtask command are also inherited. RUSTUP_TOOLCHAIN is removed
     // so the rust-toolchain.toml file in the -ebpf folder is honored.
 
+    /*
     let tc_status = Command::new("cargo")
         .current_dir(tc_dir)
         .env_remove("RUSTUP_TOOLCHAIN")
@@ -65,6 +71,7 @@ pub fn build_ebpf(opts: Options) -> Result<(), anyhow::Error> {
         .status()
         .expect("failed to build tc bpf program");
     assert!(tc_status.success());
+
     let xdp_status = Command::new("cargo")
         .current_dir(xdp_dir)
         .env_remove("RUSTUP_TOOLCHAIN")
@@ -72,5 +79,31 @@ pub fn build_ebpf(opts: Options) -> Result<(), anyhow::Error> {
         .status()
         .expect("failed to build xdp bpf program");
     assert!(xdp_status.success());
+    */
+
+    let xdp_encap_status = Command::new("cargo")
+        .current_dir(xdp_encap_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .args(&args)
+        .status()
+        .expect("failed to build xdp encap bpf program");
+    assert!(xdp_encap_status.success());
+
+    let xdp_decap_status = Command::new("cargo")
+        .current_dir(xdp_decap_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .args(&args)
+        .status()
+        .expect("failed to build xdp decap bpf program");
+    assert!(xdp_decap_status.success());
+
+    let xdp_dummy_status = Command::new("cargo")
+        .current_dir(xdp_dummy_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .args(&args)
+        .status()
+        .expect("failed to build xdp dummy bpf program");
+    assert!(xdp_dummy_status.success());
+    
     Ok(())
 }
