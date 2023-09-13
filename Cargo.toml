@@ -3,7 +3,6 @@
 members = [
     "sprayer/xtask",
     "sprayer/sprayer",
-    "sprayer/common",
     "server",
 ]
 resolver = "2"

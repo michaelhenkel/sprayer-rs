@@ -2,49 +2,57 @@ sudo ip link add name fabric type bridge
 sudo ip link set dev fabric up
 
 host=host1
-sudo ip link add name ${host} type bridge
-sudo ip link set dev ${host} up
+ip=192.168.0.1/24
+sudo ip netns add ${host}
 sudo ip link add name ${host}-phy type veth peer name ${host}-fab
 sudo ip link set dev ${host}-fab up
-sudo ip link set dev ${host}-phy up
 sudo ip link set dev ${host}-fab master fabric
-sudo ip link set dev ${host}-phy master ${host}
-sudo ip link set dev ${host}-fab mtu 3000
-sudo ip link set dev ${host}-phy mtu 3000
+sudo ip link set dev ${host}-phy netns ${host}
+sudo ip netns exec ${host} ip link set dev ${host}-phy up
+sudo ip netns exec ${host} ip addr add ${ip} dev ${host}-phy
+
 
 ns=ns1
 ip=10.0.0.1/24
+table=1
 sudo ip netns add ${ns}
 sudo ip link add name ${ns} type veth peer name ${host}-${ns}
 sudo ip link set ${ns} netns ${ns}
-sudo ip link set ${host}-${ns} up
+sudo ip link set ${host}-${ns} netns ${host}
+sudo ip netns exec ${host} ip link set ${host}-${ns} up
 sudo ip netns exec ${ns} ip link set ${ns} up
 sudo ip netns exec ${ns} ip addr add ${ip} dev ${ns}
-sudo ip link set dev ${host}-${ns} master ${host}
-sudo ip netns exec ${ns} ip route change 10.0.0.0/24 dev ns1 proto kernel scope link src ${ip} advmss 2900
+sudo ip netns exec ${host} ip link add ${ns}-vrf type vrf table ${table}
+sudo ip netns exec ${host} ip link set ${ns}-vrf up
+sudo ip netns exec ${host} ip link set ${host}-${ns} master ${ns}-vrf
+
+#sudo ip netns exec ${ns} ip route change 10.0.0.0/24 dev ns1 proto kernel scope link src ${ip} advmss 2900
 
 
 host=host2
-sudo ip link add name ${host} type bridge
-sudo ip link set dev ${host} up
+ip=192.168.0.2/24
+sudo ip netns add ${host}
 sudo ip link add name ${host}-phy type veth peer name ${host}-fab
 sudo ip link set dev ${host}-fab up
-sudo ip link set dev ${host}-phy up
 sudo ip link set dev ${host}-fab master fabric
-sudo ip link set dev ${host}-phy master ${host}
-sudo ip link set dev ${host}-fab mtu 3000
-sudo ip link set dev ${host}-phy mtu 3000
+sudo ip link set dev ${host}-phy netns ${host}
+sudo ip netns exec ${host} ip link set dev ${host}-phy up
+sudo ip netns exec ${host} ip addr add ${ip} dev ${host}-phy
+
 
 ns=ns2
 ip=10.0.0.2/24
+table=2
 sudo ip netns add ${ns}
 sudo ip link add name ${ns} type veth peer name ${host}-${ns}
 sudo ip link set ${ns} netns ${ns}
-sudo ip link set ${host}-${ns} up
+sudo ip link set ${host}-${ns} netns ${host}
+sudo ip netns exec ${host} ip link set ${host}-${ns} up
 sudo ip netns exec ${ns} ip link set ${ns} up
 sudo ip netns exec ${ns} ip addr add ${ip} dev ${ns}
-sudo ip link set dev ${host}-${ns} master ${host}
-sudo ip netns exec ${ns} ip route change 10.0.0.0/24 dev ns1 proto kernel scope link src ${ip} advmss 2900
+sudo ip netns exec ${host} ip link add ${ns}-vrf type vrf table ${table}
+sudo ip netns exec ${host} ip link set ${ns}-vrf up
+sudo ip netns exec ${host} ip link set ${host}-${ns} master ${ns}-vrf
 
 
 sudo ip netns del ns1 

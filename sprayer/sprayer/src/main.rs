@@ -1,16 +1,17 @@
 use anyhow::Context;
 use aya::maps::HashMap;
-use aya::programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags};
+use aya::programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags, ProgramFd, self};
 use aya::{include_bytes_aligned, Bpf, maps::Array};
 use aya_log::BpfLogger;
 use clap::Parser;
 use log::{info, warn, debug};
 use tokio::signal;
-use common::Ports;
+use common::NetworkKey;
 use std::ffi::CString;
+use std::net::Ipv4Addr;
 use std::os::raw::c_int;
 use std::io::{Error, ErrorKind};
-use nix::ifaddrs::getifaddrs;
+use nix::ifaddrs::{getifaddrs, InterfaceAddress};
 
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -35,6 +36,11 @@ struct Opt {
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
+
+    let next_hop_map = std::collections::HashMap::from([
+        ("10.0.0.2".to_string(), "192.168.0.2".to_string()),
+        ("10.0.0.1".to_string(), "192.168.0.1".to_string())
+    ]);
 
     env_logger::init();
 
@@ -86,14 +92,38 @@ async fn main() -> Result<(), anyhow::Error> {
         "../../target/bpfel-unknown-none/release/xdp-dummy"
     ))?;
 
+
+    let mut ebpf_shared = Bpf::load(include_bytes_aligned!(
+        "../../target/bpfel-unknown-none/release/xdp-dummy"
+    ))?;
+
+    //let p: &mut programs:: = ebpf_shared.program_mut("name").unwrap().try_into()?;;
+    //p.load()?;
+
     let intf_list = get_mac_addresses_and_interface_indexes();
+
+    let mac_address = "de:ad:be:ef:ba:be";
+    let bytes: Vec<u8> = mac_address
+        .split(':')
+        .map(|s| u8::from_str_radix(s, 16).unwrap())
+        .collect();
+    let mut proxy_mac_addr: [u8; 6] = [0; 6];
+    proxy_mac_addr.copy_from_slice(&bytes[..]);
+    proxy_mac_addr.reverse();
 
     match opt.mode{
         Mode::Encap => {
             info!("encap mode");
             let ifidx = get_interface_index(&opt.phy)?;
             info!("phy ifidx {}", ifidx);
-
+            let phy_intf_addr = if let Some(addr) = get_interface_ip_address(&opt.phy){
+                    addr
+            } else {
+                warn!("failed to find ip");
+                return Ok(())
+            };
+            info!("phy intf addr {}", phy_intf_addr);
+            
             
             if let Err(e) = BpfLogger::init(&mut xdp_encap_bpf) {
                 // This can happen if you remove all log statements from your eBPF program.
@@ -103,8 +133,8 @@ async fn main() -> Result<(), anyhow::Error> {
             xdp_program.load()?;
 
 
-            xdp_program.attach(&opt.iface, XdpFlags::SKB_MODE)
-                .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
+            xdp_program.attach(&opt.iface, XdpFlags::DRV_MODE)
+                .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
             
             if let Some(phy_intf_map) = xdp_encap_bpf.map_mut("PHYINTF"){
                 let mut phy_intf_map: HashMap<_, u8, u32> = HashMap::try_from(phy_intf_map)?;
@@ -120,6 +150,50 @@ async fn main() -> Result<(), anyhow::Error> {
             } else {
                 warn!("DEVMAP map not found");
             }
+
+            if let Some(proxy_mac) = xdp_encap_bpf.map_mut("PROXYMAC"){
+                let mut proxy_mac: HashMap<_, u8, [u8;6]> = HashMap::try_from(proxy_mac)?;
+                proxy_mac.insert(&0, &proxy_mac_addr, 0)?;
+            } else {
+                warn!("DEVMAP map not found");
+            }
+             
+            if let Some(nw_map) = xdp_encap_bpf.map_mut("NETWORKS"){
+                let mut nw_map: HashMap<_, NetworkKey, u32> = HashMap::try_from(nw_map)?;
+                let prefix: Ipv4Addr = "10.0.0.0".parse()?;
+                let prefix_int = u32::from_be_bytes(prefix.octets());
+                let key = NetworkKey{
+                    prefix: prefix_int,
+                    prefix_len: 24,
+                };
+                let gateway: Ipv4Addr = "10.0.0.1".parse()?;
+                let gateway_int = u32::from_be_bytes(gateway.octets());
+
+                nw_map.insert(&key, &gateway_int, 0)?;
+            } else {
+                warn!("NETWORKS map not found");
+            }
+
+            for (dst, nh) in &next_hop_map{
+                let dst_addr: Ipv4Addr = dst.parse()?;
+                let dst_int = u32::from_be_bytes(dst_addr.octets());
+                let nh_addr: Ipv4Addr = nh.parse()?;
+                let nh_int = u32::from_be_bytes(nh_addr.octets());
+                if let Some(nh_map) = xdp_encap_bpf.map_mut("NEXTHOP"){
+                    let mut nh_map: HashMap<_, u32, u32> = HashMap::try_from(nh_map)?;
+                    nh_map.insert(&dst_int, &nh_int, 0)?;
+                } else {
+                    warn!("NEXTHOP map not found");
+                }
+            }
+
+            if let Some(phy_ip) = xdp_encap_bpf.map_mut("PHYIP"){
+                let mut phy_ip: HashMap<_, u8, u32> = HashMap::try_from(phy_ip)?;
+                phy_ip.insert(&0, &phy_intf_addr, 0)?;
+            } else {
+                warn!("DEVMAP map not found");
+            }
+            
         },
         Mode::Dummy => {
             info!("dummy mode");
@@ -130,7 +204,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let xdp_program: &mut Xdp = xdp_dummy_bpf.program_mut("xdp_dummy").unwrap().try_into()?;
             xdp_program.load()?;
             xdp_program.attach(&opt.iface, XdpFlags::DRV_MODE)
-                .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;           
+                .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;           
         }
         Mode::Decap => {
             info!("decap mode");
@@ -141,7 +215,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let xdp_program: &mut Xdp = xdp_decap_bpf.program_mut("xdp_decap").unwrap().try_into()?;
             xdp_program.load()?;
             xdp_program.attach(&opt.iface, XdpFlags::DRV_MODE)
-                .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
+                .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
         },
     }
 
@@ -212,4 +286,19 @@ fn get_mac_addresses_and_interface_indexes() -> Vec<([u8; 6], u32)> {
         }
     }
     mac_addresses_and_interface_indexes
+}
+
+fn get_interface_ip_address(interface_name: &str) -> Option<u32> {
+    if let Ok(ifaddrs) = getifaddrs() {
+        for ifaddr in ifaddrs {
+            if ifaddr.interface_name == interface_name {
+                if let Some(address) = ifaddr.address {
+                    if let Some(ip_address) = address.as_sockaddr_in() {
+                        return Some(ip_address.ip())
+                    }
+                }
+            }
+        }
+    }
+    None
 }
