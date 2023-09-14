@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 aya-bpf = { git = "https://github.com/aya-rs/aya" }
 aya-log-ebpf = { git = "https://github.com/aya-rs/aya" }
-#common = { path = "../common", features=["user"] }
+common = { path = "../common" }
 network-types = "0.0.4"
 
 [[bin]]

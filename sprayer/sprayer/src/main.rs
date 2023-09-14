@@ -6,7 +6,7 @@ use aya_log::BpfLogger;
 use clap::Parser;
 use log::{info, warn, debug};
 use tokio::signal;
-use common::NetworkKey;
+use common::{NetworkKey,Interface};
 use std::ffi::CString;
 use std::net::Ipv4Addr;
 use std::os::raw::c_int;
@@ -40,6 +40,19 @@ async fn main() -> Result<(), anyhow::Error> {
     let next_hop_map = std::collections::HashMap::from([
         ("10.0.0.2".to_string(), "192.168.0.2".to_string()),
         ("10.0.0.1".to_string(), "192.168.0.1".to_string())
+    ]);
+
+    let interface_map = std::collections::HashMap::from([
+        (ip_to_dec("10.0.0.1"), Interface{
+            mac: mac_to_vec("d2:0f:de:ef:21:30"),
+            ifidx: 67,
+            next_hop: ip_to_dec("192.168.0.1"),
+        }),
+        (ip_to_dec("10.0.0.2"), Interface{
+            mac: mac_to_vec("8a:e5:ee:91:e8:16"),
+            ifidx: 71,
+            next_hop: ip_to_dec("192.168.0.2"),
+        }),
     ]);
 
     env_logger::init();
@@ -187,6 +200,15 @@ async fn main() -> Result<(), anyhow::Error> {
                 }
             }
 
+            for (dst, intf) in &interface_map{;
+                if let Some(intf_map) = xdp_encap_bpf.map_mut("INTERFACE"){
+                    let mut intf_map: HashMap<_, u32, Interface> = HashMap::try_from(intf_map)?;
+                    intf_map.insert(dst, intf, 0)?;
+                } else {
+                    warn!("INTERFACE map not found");
+                }
+            }
+
             if let Some(phy_ip) = xdp_encap_bpf.map_mut("PHYIP"){
                 let mut phy_ip: HashMap<_, u8, u32> = HashMap::try_from(phy_ip)?;
                 phy_ip.insert(&0, &phy_intf_addr, 0)?;
@@ -216,6 +238,14 @@ async fn main() -> Result<(), anyhow::Error> {
             xdp_program.load()?;
             xdp_program.attach(&opt.iface, XdpFlags::DRV_MODE)
                 .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
+            for (dst, intf) in &interface_map{;
+                if let Some(intf_map) = xdp_decap_bpf.map_mut("INTERFACE"){
+                    let mut intf_map: HashMap<_, u32, Interface> = HashMap::try_from(intf_map)?;
+                    intf_map.insert(dst, intf, 0)?;
+                } else {
+                    warn!("INTERFACE map not found");
+                }
+            }
         },
     }
 
@@ -301,4 +331,19 @@ fn get_interface_ip_address(interface_name: &str) -> Option<u32> {
         }
     }
     None
+}
+
+fn mac_to_vec(mac: &str) -> [u8; 6]{
+    let bytes: Vec<u8> = mac
+        .split(':')
+        .map(|s| u8::from_str_radix(s, 16).unwrap())
+        .collect();
+    let mut mac_addr: [u8; 6] = [0; 6];
+    mac_addr.copy_from_slice(&bytes[..]);
+    mac_addr
+}
+
+fn ip_to_dec(ip: &str) -> u32{
+    let ip_addr: Ipv4Addr = ip.parse().unwrap();
+    u32::from_be_bytes(ip_addr.octets())
 }

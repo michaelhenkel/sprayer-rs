@@ -16,6 +16,11 @@ use network_types::{
     udp::UdpHdr,
 };
 use core::mem::{self, zeroed, size_of};
+use common::Interface;
+
+#[map(name = "INTERFACE")]
+static mut INTERFACE: HashMap<u32, Interface> =
+    HashMap::<u32, Interface>::with_max_entries(256, 0);
 
 #[map(name = "DEVMAP")]
 static mut DEVMAP: HashMap<[u8;6], u32> =
@@ -48,30 +53,17 @@ fn try_xdp_decap(ctx: XdpContext) -> Result<u32, u32> {
         }
         let inner_ip = ptr_at_mut::<Ipv4Hdr>(&ctx, EthHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
         let dst_ip = unsafe { (*inner_ip).dst_addr };
-        let if_idx = unsafe { (*ctx.ctx).ingress_ifindex };
-        
-        let mut params: bindings::bpf_fib_lookup = unsafe { zeroed() };
-        params.family = 2;
-        params.ifindex = if_idx;
-        params.__bindgen_anon_4.ipv4_dst = dst_ip;
-        let params_ptr: *mut bindings::bpf_fib_lookup = &mut params as *mut _;
-        let param_size = size_of::<bindings::bpf_fib_lookup>();
-        
-        info!(&ctx, "param_size: {}", param_size);
-        let ctx_ptr = ctx.ctx as *mut _ as *mut c_void;
-        let ret: i64 = unsafe {
-            bpf_fib_lookup(ctx_ptr, params_ptr, 64, 0)
+
+        let nh_intf = match unsafe { INTERFACE.get(&u32::from_be(dst_ip)) } {
+            Some(nh_intf) => {
+                nh_intf
+            }
+            None => {
+                info!(&ctx, "nh not found");
+                return Ok(xdp_action::XDP_ABORTED)
+            }
         };
-        
-        if ret != 0 {
-            info!(&ctx,"fib lookup failed for dst ip {:i}, ifidx {}, ret {}",dst_ip, if_idx, ret);
-            return Ok(xdp_action::XDP_DROP);
-        }
-        //let mut outer_eth_hdr = unsafe { inner_eth.read() };
-        //outer_eth_hdr.dst_addr = params.dmac;
-        //outer_eth_hdr.src_addr = params.smac;
-        //unsafe { inner_eth.write(outer_eth_hdr);};
-        unsafe { bpf_redirect(params.ifindex, 0) }
+        unsafe { bpf_redirect(nh_intf.ifidx, 0) }
 
     } else {
         xdp_action::XDP_PASS.into()
