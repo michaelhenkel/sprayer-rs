@@ -27,7 +27,6 @@ pub fn xdp_dummy(ctx: XdpContext) -> u32 {
 }
 
 fn try_xdp_dummy(ctx: XdpContext) -> Result<u32, u32> {
-    info!(&ctx, "xdp_dummy");
     Ok(xdp_action::XDP_PASS)
 }
 

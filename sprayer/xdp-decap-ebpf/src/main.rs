@@ -35,7 +35,7 @@ pub fn xdp_decap(ctx: XdpContext) -> u32 {
 }
 
 fn try_xdp_decap(ctx: XdpContext) -> Result<u32, u32> {
-    info!(&ctx, "xdp_decap");
+    //info!(&ctx, "xdp_decap");
     let eth = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
     if unsafe{ (*eth).ether_type } != EtherType::Ipv4 {
         return Ok(xdp_action::XDP_PASS);
@@ -68,7 +68,7 @@ fn try_xdp_decap(ctx: XdpContext) -> Result<u32, u32> {
     } else {
         xdp_action::XDP_PASS.into()
     };
-    info!(&ctx, "redirect res: {}", res);
+    //info!(&ctx, "redirect res: {}", res);
     Ok(res as u32)
 }
 

@@ -101,10 +101,8 @@ pub fn xdp_encap(ctx: XdpContext) -> u32 {
 }
 
 fn try_xdp_encap(ctx: XdpContext, phy_intf: u32) -> Result<u32, u32> {
-    info!(&ctx, "xdp_encap");
     let flow_next_hop = match get_v4_next_hop_from_flow_table(&ctx) {
         Some(fnh) => {
-            info!( &ctx, "flow found");
             fnh
         }
         None => {
@@ -128,35 +126,6 @@ fn try_xdp_encap(ctx: XdpContext, phy_intf: u32) -> Result<u32, u32> {
     };
 
     let res = write_outer_hdr(&ctx, flow_next_hop);
-    
-    
-    
-    let eth_hdr_ptr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
-    let src_mac = unsafe { (*eth_hdr_ptr).src_addr };
-    let src_mac_le = u64::from_be_bytes([src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5], 0,0]);
-    info!( &ctx, "src_mac: {:x}", src_mac_le);
-    let dst_mac = unsafe { (*eth_hdr_ptr).dst_addr };
-    let dst_mac_le = u64::from_be_bytes([dst_mac[0], dst_mac[1], dst_mac[2], dst_mac[3], dst_mac[4], dst_mac[5], 0,0]);
-    info!( &ctx, "dst_mac: {:x}", dst_mac_le);
-    let ether_type = unsafe { (*eth_hdr_ptr).ether_type };
-    match ether_type{
-        EtherType::Ipv4 => info!(&ctx, "ether_type: ipv4"),
-        _ => info!(&ctx, "ether_type: {}", ether_type as u16),
-    }
-
-    let ip_hdr_ptr = ptr_at_mut::<Ipv4Hdr>(&ctx, EthHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
-    let src_ip = u32::from_be(unsafe { (*ip_hdr_ptr).src_addr });
-    info!( &ctx, "src_ip: {:i}", src_ip);
-    let dst_ip = u32::from_be(unsafe { (*ip_hdr_ptr).dst_addr });
-    info!( &ctx, "dst_ip: {:i}", dst_ip);
-    let ip_proto = unsafe { (*ip_hdr_ptr).proto };
-    match ip_proto{
-        IpProto::Tcp => info!(&ctx, "ip_proto: tcp"),
-        IpProto::Udp => info!(&ctx, "ip_proto: udp"),
-        IpProto::Icmp => info!(&ctx, "ip_proto: icmp"),
-        _ => info!(&ctx, "ip_proto: {}", ip_proto as u8),
-    }
-
     res
 }
 
@@ -208,11 +177,9 @@ fn get_next_hop(ctx: &XdpContext, phy_intf: u32) -> Option<FnhOrResult> {
 
     match unsafe{ (*eth_hdr).ether_type } {
         EtherType::Arp => {
-            info!(ctx, "arp");
             let arp_hdr = ptr_at_mut::<ArpHdr>(&ctx, EthHdr::LEN)?;
             let oper = u16::from_be(unsafe{ (*arp_hdr).oper });
             if oper == 1 {
-                info!(ctx, "arp request");                
                 let dst_addr = u32::from_be(unsafe{ (*arp_hdr).tpa });
                 let src_addr = u32::from_be(unsafe{ (*arp_hdr).spa });
                 let src_mac = unsafe { (*arp_hdr).sha };
@@ -232,7 +199,7 @@ fn get_next_hop(ctx: &XdpContext, phy_intf: u32) -> Option<FnhOrResult> {
                 unsafe { (*arp_hdr).tha = src_mac};
                 unsafe { (*arp_hdr).sha = pm};
                 unsafe { eth_hdr.write(outer_eth_hdr);};
-                info!(ctx, "replying");
+                info!(ctx, "replying to arp request");
                 return Some(FnhOrResult::Result(Ok(xdp_action::XDP_TX)));
             }
             return Some(FnhOrResult::Result(Ok(xdp_action::XDP_PASS)));
@@ -272,26 +239,21 @@ fn get_next_hop(ctx: &XdpContext, phy_intf: u32) -> Option<FnhOrResult> {
                     return Some(FnhOrResult::Result(Ok(xdp_action::XDP_ABORTED)));
                 }
             };
-            info!(ctx, "nh: {}", nh);
             let phy_ip = match unsafe { PHYIP.get(&0) } {
                 Some(phy_ip) => {
                     phy_ip.clone()
                 }
                 None => {
-                    info!(ctx, "phy_ip");
                     return Some(FnhOrResult::Result(Ok(xdp_action::XDP_ABORTED)));
                 }
             };
-            info!(ctx, "phy_ip: {}", phy_ip);
             let mut params: bindings::bpf_fib_lookup = unsafe { zeroed() };
             params.family = 2;
             params.ifindex = phy_intf;
             params.__bindgen_anon_4.ipv4_dst = u32::from_be(nh);
             let params_ptr: *mut bindings::bpf_fib_lookup = &mut params as *mut _;
 
-            let param_size = size_of::<bindings::bpf_fib_lookup>();
-            info!(ctx, "param_size: {}", param_size);
-        
+            let param_size = size_of::<bindings::bpf_fib_lookup>();        
             let ctx_ptr = ctx.ctx as *mut _ as *mut c_void;
             let ret: i64 = unsafe {
                 bpf_fib_lookup(ctx_ptr, params_ptr, 64, 0)
@@ -302,7 +264,7 @@ fn get_next_hop(ctx: &XdpContext, phy_intf: u32) -> Option<FnhOrResult> {
             }
             let flow_next_hop = FlowNextHop{
                 dst_ip: unsafe { params.__bindgen_anon_4.ipv4_dst },
-                src_ip: unsafe { params.__bindgen_anon_3.ipv4_src },
+                src_ip: u32::to_be(phy_ip),
                 dst_mac: params.dmac,
                 src_mac: params.smac,
                 ifidx: params.ifindex,
@@ -336,7 +298,7 @@ fn write_outer_hdr(ctx: &XdpContext, flow_next_hop: FlowNextHop) -> Result<u32,u
         ether_type: EtherType::Ipv4,
     };
     let ip_hdr = ptr_at_mut::<Ipv4Hdr>(&ctx, EthHdr::LEN).ok_or(xdp_action::XDP_DROP)?;
-    let new_ip_hdr_tot_len = u16::from_be( unsafe { (*ip_hdr).tot_len }+ (EthHdr::LEN  + Ipv4Hdr::LEN + UdpHdr::LEN) as u16);
+    let new_ip_hdr_tot_len = u16::from_be( unsafe { (*ip_hdr).tot_len }) + (EthHdr::LEN  + Ipv4Hdr::LEN + UdpHdr::LEN) as u16;
     let new_udp_hdr_len = new_ip_hdr_tot_len - Ipv4Hdr::LEN as u16;
     let new_ip_header = Ipv4Hdr{
         _bitfield_1: unsafe { (*ip_hdr)._bitfield_1 },
