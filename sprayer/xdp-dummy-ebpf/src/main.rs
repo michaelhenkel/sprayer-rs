@@ -27,6 +27,17 @@ pub fn xdp_dummy(ctx: XdpContext) -> u32 {
 }
 
 fn try_xdp_dummy(ctx: XdpContext) -> Result<u32, u32> {
+    info!(&ctx, "xdp_dummy");
+    let eth_hdr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
+    let ip_hdr = ptr_at_mut::<Ipv4Hdr>(&ctx, EthHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+    let udp_hdr = ptr_at_mut::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+    let src_mac = unsafe { mac_to_int((*eth_hdr).src_addr) };
+    let dst_mac = unsafe { mac_to_int((*eth_hdr).dst_addr) };
+    let src_ip = unsafe { u32::from_be((*ip_hdr).src_addr) };
+    let dst_ip = unsafe { u32::from_be((*ip_hdr).dst_addr) };
+    let src_port = unsafe { u16::from_be((*udp_hdr).source) };
+    let dst_port = unsafe { u16::from_be((*udp_hdr).dest) };
+    info!(&ctx,"src_mac: {:x}, dst_mac: {:x}, src_ip: {:i}, dst_ip: {:i}, src_port: {}, dst_port: {}", src_mac, dst_mac, src_ip, dst_ip, src_port, dst_port);
     Ok(xdp_action::XDP_PASS)
 }
 
@@ -58,4 +69,14 @@ fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Option<*const T> {
 fn ptr_at_mut<T>(ctx: &XdpContext, offset: usize) -> Option<*mut T> {
     let ptr = ptr_at::<T>(ctx, offset)?;
     Some(ptr as *mut T)
+}
+
+#[inline(always)]
+fn mac_to_int(mac: [u8;6]) -> u64 {
+    let mut mac_dec: u64 = 0;
+    for i in 0..6 {
+        mac_dec = mac_dec << 8;
+        mac_dec = mac_dec | mac[i] as u64;
+    }
+    mac_dec
 }

@@ -59,6 +59,36 @@ async fn main() -> Result<(), anyhow::Error> {
         debug!("remove limit on locked memory failed, ret is: {}", ret);
     }
 
+    #[cfg(debug_assertions)]
+    let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
+        "../../target/bpfel-unknown-none/debug/xdp-encap"
+    ))?;
+    #[cfg(not(debug_assertions))]
+    info!("load encap release");
+    let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
+        "../../target/bpfel-unknown-none/release/xdp-encap"
+    ))?;
+
+    #[cfg(debug_assertions)]
+    let mut xdp_decap_bpf = Bpf::load(include_bytes_aligned!(
+        "../../target/bpfel-unknown-none/debug/xdp-decap"
+    ))?;
+    #[cfg(not(debug_assertions))]
+    info!("load decap release");
+    let mut xdp_decap_bpf = Bpf::load(include_bytes_aligned!(
+        "../../target/bpfel-unknown-none/release/xdp-decap"
+    ))?;
+
+    #[cfg(debug_assertions)]
+    let mut xdp_dummy_bpf = Bpf::load(include_bytes_aligned!(
+        "../../target/bpfel-unknown-none/debug/xdp-dummy"
+    ))?;
+    #[cfg(not(debug_assertions))]
+    info!("load release");
+    let mut xdp_dummy_bpf = Bpf::load(include_bytes_aligned!(
+        "../../target/bpfel-unknown-none/release/xdp-dummy"
+    ))?;
+
     let res = if opt.decap.is_some() && opt.encap.is_some() {
         let encap_intf = opt.encap.unwrap();
         let decap_intf = opt.decap.unwrap();
@@ -93,25 +123,7 @@ async fn main() -> Result<(), anyhow::Error> {
             return Ok(())
         };
     
-        #[cfg(debug_assertions)]
-        let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
-            "../../target/bpfel-unknown-none/debug/xdp-encap"
-        ))?;
-        #[cfg(not(debug_assertions))]
-        info!("load encap release");
-        let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
-            "../../target/bpfel-unknown-none/release/xdp-encap"
-        ))?;
-    
-        #[cfg(debug_assertions)]
-        let mut xdp_decap_bpf = Bpf::load(include_bytes_aligned!(
-            "../../target/bpfel-unknown-none/debug/xdp-decap"
-        ))?;
-        #[cfg(not(debug_assertions))]
-        info!("load decap release");
-        let mut xdp_decap_bpf = Bpf::load(include_bytes_aligned!(
-            "../../target/bpfel-unknown-none/release/xdp-decap"
-        ))?;
+
     
         if let Err(e) = BpfLogger::init(&mut xdp_encap_bpf) {
             // This can happen if you remove all log statements from your eBPF program.
@@ -135,11 +147,40 @@ async fn main() -> Result<(), anyhow::Error> {
             warn!("DECAPINTERFACE map not found");
         }
 
+        if let Err(e) = BpfLogger::init(&mut xdp_decap_bpf) {
+            // This can happen if you remove all log statements from your eBPF program.
+            warn!("failed to initialize eBPF logger: {}", e);
+        }
+        let decap_program: &mut Xdp = xdp_decap_bpf.program_mut("xdp_decap").unwrap().try_into()?;
+        decap_program.load()?;
+        decap_program.attach(&decap_intf, XdpFlags::DRV_MODE)
+            .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;  
+        if let Some(encap_intf_map) = xdp_decap_bpf.map_mut("ENCAPINTERFACE"){
+            let mut encap_intf_map: HashMap<_, u32, Interface> = HashMap::try_from(encap_intf_map)?;
+            let intf = Interface{
+                mac: encap_intf_mac,
+                ifidx: encap_intf_idx,
+                ip: u32::to_be(encap_intf_addr),
+            };
+            encap_intf_map.insert(&0, &intf, 0)?;
+        } else {
+            warn!("ENCAPINTERFACE map not found");
+        }
+        
+
 
         //encap_decap(encap_intf, decap_intf, links)?
     } else if opt.dummy.is_some() {
         let dummy_intf = opt.dummy.unwrap();
-        dummy(dummy_intf)?
+        if let Err(e) = BpfLogger::init(&mut xdp_dummy_bpf) {
+            // This can happen if you remove all log statements from your eBPF program.
+            warn!("failed to initialize eBPF logger: {}", e);
+        }
+        let xdp_program: &mut Xdp = xdp_dummy_bpf.program_mut("xdp_dummy").unwrap().try_into()?;
+        xdp_program.load()?;
+        xdp_program.attach(&dummy_intf, XdpFlags::DRV_MODE)
+            .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
+        //dummy(dummy_intf)?
     } else {
         panic!("encap and decap or dummy must be defined");
     };
@@ -151,6 +192,7 @@ async fn main() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/*
 fn encap_decap(encap_intf: String, decap_intf: String, links: u8) -> Result<(), anyhow::Error> {
     info!("encap/decap mode");
     let (encap_intf_mac, encap_intf_idx) = if let Some((encap_intf_mac, encap_intf_idx)) = get_mac_addresses_and_interface_index(&encap_intf){
@@ -222,7 +264,7 @@ fn encap_decap(encap_intf: String, decap_intf: String, links: u8) -> Result<(), 
         warn!("DECAPINTERFACE map not found");
     }
 
-    /*
+    
     if let Err(e) = BpfLogger::init(&mut xdp_decap_bpf) {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {}", e);
@@ -242,7 +284,7 @@ fn encap_decap(encap_intf: String, decap_intf: String, links: u8) -> Result<(), 
     } else {
         warn!("ENCAPINTERFACE map not found");
     }
-    */
+    
 
     info!("encap/decap loaded");
 
@@ -251,15 +293,6 @@ fn encap_decap(encap_intf: String, decap_intf: String, links: u8) -> Result<(), 
 }
 
 fn dummy(dummy_intf: String) -> Result<(), anyhow::Error> {
-    #[cfg(debug_assertions)]
-    let mut xdp_dummy_bpf = Bpf::load(include_bytes_aligned!(
-        "../../target/bpfel-unknown-none/debug/xdp-dummy"
-    ))?;
-    #[cfg(not(debug_assertions))]
-    info!("load release");
-    let mut xdp_dummy_bpf = Bpf::load(include_bytes_aligned!(
-        "../../target/bpfel-unknown-none/release/xdp-dummy"
-    ))?;
     if let Err(e) = BpfLogger::init(&mut xdp_dummy_bpf) {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {}", e);
@@ -270,6 +303,7 @@ fn dummy(dummy_intf: String) -> Result<(), anyhow::Error> {
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
     Ok(())
 }
+*/
 
 fn get_interface_index(interface_name: &str) -> Result<u32, Error> {
     let interface_name_cstring = CString::new(interface_name)?;

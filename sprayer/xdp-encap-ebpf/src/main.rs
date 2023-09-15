@@ -106,6 +106,14 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface) -> Result<u32, u32> {
         check: 0,
     };
 
+    let src_mac = mac_to_int(outer_eth_hdr.src_addr);
+    let dst_mac = mac_to_int(outer_eth_hdr.dst_addr);
+    let src_ip = u32::from_be(outer_ip_hdr.src_addr);
+    let dst_ip = u32::from_be(outer_ip_hdr.dst_addr);
+    let src_port = u16::from_be(outer_udp_hdr.source);
+    let dst_port = u16::from_be(outer_udp_hdr.dest);
+    info!(&ctx, "src_mac: {:x}, dst_mac: {:x}, src_ip: {:i}, dst_ip: {:i}, src_port: {}, dst_port: {}", src_mac, dst_mac, src_ip, dst_ip, src_port, dst_port);
+
     unsafe {
         bpf_xdp_adjust_head(ctx.ctx, -((EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as i32));
     }
@@ -118,8 +126,18 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface) -> Result<u32, u32> {
     unsafe { outer_udp_ptr.write(outer_udp_hdr); };
 
     let res = unsafe { bpf_redirect(decap_intf.ifidx, 0) };
-
+    info!(&ctx, "redirect res: {}", res);
     Ok(res as u32)
+}
+
+#[inline(always)]
+fn mac_to_int(mac: [u8;6]) -> u64 {
+    let mut mac_dec: u64 = 0;
+    for i in 0..6 {
+        mac_dec = mac_dec << 8;
+        mac_dec = mac_dec | mac[i] as u64;
+    }
+    mac_dec
 }
 
 #[inline(always)]
