@@ -6,7 +6,7 @@ use aya_log::BpfLogger;
 use clap::Parser;
 use log::{info, warn, debug};
 use tokio::signal;
-use common::{NetworkKey,Interface};
+use common::Interface;
 use std::ffi::CString;
 use std::net::Ipv4Addr;
 use std::os::raw::c_int;
@@ -16,44 +16,35 @@ use nix::ifaddrs::{getifaddrs, InterfaceAddress};
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum Mode{
-    Encap,
-    Decap,
+    EncapDecap,
     Dummy,
 }
 
 #[derive(Debug, Parser)]
 struct Opt {
-    #[clap(short, long, default_value = "eth0")]
-    iface: String,
-    #[clap(short, long, default_value = "eth0")]
-    phy: String,
+    #[clap(short, long)]
+    encap: Option<String>,
+    #[clap(short, long)]
+    decap: Option<String>,
     #[clap(short, long, default_value = "1")]
-    links: u16,
-    #[clap(value_enum)]
-    mode: Mode,
+    links: u8,
+    #[clap(short, long)]
+    dummy: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
 
-    let next_hop_map = std::collections::HashMap::from([
-        ("10.0.0.2".to_string(), "192.168.0.2".to_string()),
-        ("10.0.0.1".to_string(), "192.168.0.1".to_string())
-    ]);
+    if (opt.encap.is_some() && opt.decap.is_none() || (opt.encap.is_none() && opt.decap.is_some())){
+        panic!("encap and decap must be defined");
+    }
 
-    let interface_map = std::collections::HashMap::from([
-        (ip_to_dec("10.0.0.1"), Interface{
-            mac: mac_to_vec("d2:0f:de:ef:21:30"),
-            ifidx: 67,
-            next_hop: ip_to_dec("192.168.0.1"),
-        }),
-        (ip_to_dec("10.0.0.2"), Interface{
-            mac: mac_to_vec("8a:e5:ee:91:e8:16"),
-            ifidx: 71,
-            next_hop: ip_to_dec("192.168.0.2"),
-        }),
-    ]);
+    if opt.dummy.is_some() && (opt.decap.is_some() || opt.encap.is_some()){
+        panic!("dummy cannot be defined with encap or decap");
+    }
+
+
 
     env_logger::init();
 
@@ -68,18 +59,134 @@ async fn main() -> Result<(), anyhow::Error> {
         debug!("remove limit on locked memory failed, ret is: {}", ret);
     }
 
-    // This will include your eBPF object file as raw bytes at compile-time and load it at
-    // runtime. This approach is recommended for most real-world use cases. If you would
-    // like to specify the eBPF program at runtime rather than at compile-time, you can
-    // reach for `Bpf::load_file` instead.
-    info!("starting...");
+    let res = if opt.decap.is_some() && opt.encap.is_some() {
+        let encap_intf = opt.encap.unwrap();
+        let decap_intf = opt.decap.unwrap();
+        let links = opt.links;
+
+        info!("encap/decap mode");
+        let (encap_intf_mac, encap_intf_idx) = if let Some((encap_intf_mac, encap_intf_idx)) = get_mac_addresses_and_interface_index(&encap_intf){
+            (encap_intf_mac, encap_intf_idx)
+        } else {
+            warn!("failed to find mac or idx for encap");
+            return Ok(())
+        };
+    
+        let (decap_intf_mac, decap_intf_idx) = if let Some((decap_intf_mac, decap_intf_idx)) = get_mac_addresses_and_interface_index(&decap_intf){
+            (decap_intf_mac, decap_intf_idx)
+        } else {
+            warn!("failed to find mac or idx for decap");
+            return Ok(())
+        };
+    
+        let encap_intf_addr = if let Some(addr) = get_interface_ip_address(&encap_intf){
+            addr
+        } else {
+            warn!("failed to find ip");
+            return Ok(())
+        };
+    
+        let decap_intf_addr = if let Some(addr) = get_interface_ip_address(&decap_intf){
+            addr
+        } else {
+            warn!("failed to find ip");
+            return Ok(())
+        };
+    
+        #[cfg(debug_assertions)]
+        let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
+            "../../target/bpfel-unknown-none/debug/xdp-encap"
+        ))?;
+        #[cfg(not(debug_assertions))]
+        info!("load encap release");
+        let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
+            "../../target/bpfel-unknown-none/release/xdp-encap"
+        ))?;
+    
+        #[cfg(debug_assertions)]
+        let mut xdp_decap_bpf = Bpf::load(include_bytes_aligned!(
+            "../../target/bpfel-unknown-none/debug/xdp-decap"
+        ))?;
+        #[cfg(not(debug_assertions))]
+        info!("load decap release");
+        let mut xdp_decap_bpf = Bpf::load(include_bytes_aligned!(
+            "../../target/bpfel-unknown-none/release/xdp-decap"
+        ))?;
+    
+        if let Err(e) = BpfLogger::init(&mut xdp_encap_bpf) {
+            // This can happen if you remove all log statements from your eBPF program.
+            warn!("failed to initialize eBPF logger: {}", e);
+        }
+        info!("loading encap on interface {}", encap_intf);
+        let encap_program: &mut Xdp = xdp_encap_bpf.program_mut("xdp_encap").unwrap().try_into()?;
+        encap_program.load()?;
+        encap_program.attach(&encap_intf, XdpFlags::DRV_MODE)
+            .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
+        
+        if let Some(decap_intf_map) = xdp_encap_bpf.map_mut("DECAPINTERFACE"){
+            let mut decap_intf_map: HashMap<_, u32, Interface> = HashMap::try_from(decap_intf_map)?;
+            let intf = Interface{
+                mac: decap_intf_mac,
+                ifidx: decap_intf_idx,
+                ip: u32::to_be(decap_intf_addr),
+            };
+            decap_intf_map.insert(&0, &intf, 0)?;
+        } else {
+            warn!("DECAPINTERFACE map not found");
+        }
+
+
+        //encap_decap(encap_intf, decap_intf, links)?
+    } else if opt.dummy.is_some() {
+        let dummy_intf = opt.dummy.unwrap();
+        dummy(dummy_intf)?
+    } else {
+        panic!("encap and decap or dummy must be defined");
+    };
+
+    info!("Waiting for Ctrl-C...");
+    signal::ctrl_c().await?;
+    info!("Exiting...");
+
+    Ok(())
+}
+
+fn encap_decap(encap_intf: String, decap_intf: String, links: u8) -> Result<(), anyhow::Error> {
+    info!("encap/decap mode");
+    let (encap_intf_mac, encap_intf_idx) = if let Some((encap_intf_mac, encap_intf_idx)) = get_mac_addresses_and_interface_index(&encap_intf){
+        (encap_intf_mac, encap_intf_idx)
+    } else {
+        warn!("failed to find mac or idx for encap");
+        return Ok(())
+    };
+
+    let (decap_intf_mac, decap_intf_idx) = if let Some((decap_intf_mac, decap_intf_idx)) = get_mac_addresses_and_interface_index(&decap_intf){
+        (decap_intf_mac, decap_intf_idx)
+    } else {
+        warn!("failed to find mac or idx for decap");
+        return Ok(())
+    };
+
+    let encap_intf_addr = if let Some(addr) = get_interface_ip_address(&encap_intf){
+        addr
+    } else {
+        warn!("failed to find ip");
+        return Ok(())
+    };
+
+    let decap_intf_addr = if let Some(addr) = get_interface_ip_address(&decap_intf){
+        addr
+    } else {
+        warn!("failed to find ip");
+        return Ok(())
+    };
 
     #[cfg(debug_assertions)]
     let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
         "../../target/bpfel-unknown-none/debug/xdp-encap"
     ))?;
     #[cfg(not(debug_assertions))]
-    info!("load release");
+    info!("load encap release");
     let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
         "../../target/bpfel-unknown-none/release/xdp-encap"
     ))?;
@@ -89,12 +196,61 @@ async fn main() -> Result<(), anyhow::Error> {
         "../../target/bpfel-unknown-none/debug/xdp-decap"
     ))?;
     #[cfg(not(debug_assertions))]
-    info!("load release");
+    info!("load decap release");
     let mut xdp_decap_bpf = Bpf::load(include_bytes_aligned!(
         "../../target/bpfel-unknown-none/release/xdp-decap"
     ))?;
 
+    if let Err(e) = BpfLogger::init(&mut xdp_encap_bpf) {
+        // This can happen if you remove all log statements from your eBPF program.
+        warn!("failed to initialize eBPF logger: {}", e);
+    }
+    info!("loading encap on interface {}", encap_intf);
+    let encap_program: &mut Xdp = xdp_encap_bpf.program_mut("xdp_encap").unwrap().try_into()?;
+    encap_program.load()?;
+    encap_program.attach(&encap_intf, XdpFlags::DRV_MODE)
+        .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
+    if let Some(decap_intf_map) = xdp_encap_bpf.map_mut("DECAPINTERFACE"){
+        let mut decap_intf_map: HashMap<_, u32, Interface> = HashMap::try_from(decap_intf_map)?;
+        let intf = Interface{
+            mac: decap_intf_mac,
+            ifidx: decap_intf_idx,
+            ip: u32::to_be(decap_intf_addr),
+        };
+        decap_intf_map.insert(&0, &intf, 0)?;
+    } else {
+        warn!("DECAPINTERFACE map not found");
+    }
 
+    /*
+    if let Err(e) = BpfLogger::init(&mut xdp_decap_bpf) {
+        // This can happen if you remove all log statements from your eBPF program.
+        warn!("failed to initialize eBPF logger: {}", e);
+    }
+    let decap_program: &mut Xdp = xdp_decap_bpf.program_mut("xdp_decap").unwrap().try_into()?;
+    decap_program.load()?;
+    decap_program.attach(&decap_intf, XdpFlags::DRV_MODE)
+        .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;  
+    if let Some(encap_intf_map) = xdp_decap_bpf.map_mut("ENCAPINTERFACE"){
+        let mut encap_intf_map: HashMap<_, u32, Interface> = HashMap::try_from(encap_intf_map)?;
+        let intf = Interface{
+            mac: encap_intf_mac,
+            ifidx: encap_intf_idx,
+            ip: u32::to_be(encap_intf_addr),
+        };
+        encap_intf_map.insert(&0, &intf, 0)?;
+    } else {
+        warn!("ENCAPINTERFACE map not found");
+    }
+    */
+
+    info!("encap/decap loaded");
+
+
+    Ok(())
+}
+
+fn dummy(dummy_intf: String) -> Result<(), anyhow::Error> {
     #[cfg(debug_assertions)]
     let mut xdp_dummy_bpf = Bpf::load(include_bytes_aligned!(
         "../../target/bpfel-unknown-none/debug/xdp-dummy"
@@ -104,187 +260,14 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut xdp_dummy_bpf = Bpf::load(include_bytes_aligned!(
         "../../target/bpfel-unknown-none/release/xdp-dummy"
     ))?;
-
-
-    let mut ebpf_shared = Bpf::load(include_bytes_aligned!(
-        "../../target/bpfel-unknown-none/release/xdp-dummy"
-    ))?;
-
-    //let p: &mut programs:: = ebpf_shared.program_mut("name").unwrap().try_into()?;;
-    //p.load()?;
-
-    let intf_list = get_mac_addresses_and_interface_indexes();
-
-    let mac_address = "de:ad:be:ef:ba:be";
-    let bytes: Vec<u8> = mac_address
-        .split(':')
-        .map(|s| u8::from_str_radix(s, 16).unwrap())
-        .collect();
-    let mut proxy_mac_addr: [u8; 6] = [0; 6];
-    proxy_mac_addr.copy_from_slice(&bytes[..]);
-    proxy_mac_addr.reverse();
-
-    match opt.mode{
-        Mode::Encap => {
-            info!("encap mode");
-            let ifidx = get_interface_index(&opt.phy)?;
-            info!("phy ifidx {}", ifidx);
-            let phy_intf_addr = if let Some(addr) = get_interface_ip_address(&opt.phy){
-                    addr
-            } else {
-                warn!("failed to find ip");
-                return Ok(())
-            };
-            info!("phy intf addr {}", phy_intf_addr);
-            
-            
-            if let Err(e) = BpfLogger::init(&mut xdp_encap_bpf) {
-                // This can happen if you remove all log statements from your eBPF program.
-                warn!("failed to initialize eBPF logger: {}", e);
-            }
-            let xdp_program: &mut Xdp = xdp_encap_bpf.program_mut("xdp_encap").unwrap().try_into()?;
-            xdp_program.load()?;
-
-
-            xdp_program.attach(&opt.iface, XdpFlags::DRV_MODE)
-                .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
-            
-            if let Some(phy_intf_map) = xdp_encap_bpf.map_mut("PHYINTF"){
-                let mut phy_intf_map: HashMap<_, u8, u32> = HashMap::try_from(phy_intf_map)?;
-                phy_intf_map.insert(&0, &ifidx, 0)?;
-            } else {
-                warn!("LINKS map not found");
-            }
-            if let Some(dev_map) = xdp_encap_bpf.map_mut("DEVMAP"){
-                let mut dev_map: HashMap<_, [u8;6], u32> = HashMap::try_from(dev_map)?;
-                for (k,v) in intf_list{
-                    dev_map.insert(&k, &v, 0)?;
-                }  
-            } else {
-                warn!("DEVMAP map not found");
-            }
-
-            if let Some(proxy_mac) = xdp_encap_bpf.map_mut("PROXYMAC"){
-                let mut proxy_mac: HashMap<_, u8, [u8;6]> = HashMap::try_from(proxy_mac)?;
-                proxy_mac.insert(&0, &proxy_mac_addr, 0)?;
-            } else {
-                warn!("DEVMAP map not found");
-            }
-             
-            if let Some(nw_map) = xdp_encap_bpf.map_mut("NETWORKS"){
-                let mut nw_map: HashMap<_, NetworkKey, u32> = HashMap::try_from(nw_map)?;
-                let prefix: Ipv4Addr = "10.0.0.0".parse()?;
-                let prefix_int = u32::from_be_bytes(prefix.octets());
-                let key = NetworkKey{
-                    prefix: prefix_int,
-                    prefix_len: 24,
-                };
-                let gateway: Ipv4Addr = "10.0.0.1".parse()?;
-                let gateway_int = u32::from_be_bytes(gateway.octets());
-
-                nw_map.insert(&key, &gateway_int, 0)?;
-            } else {
-                warn!("NETWORKS map not found");
-            }
-
-            for (dst, nh) in &next_hop_map{
-                let dst_addr: Ipv4Addr = dst.parse()?;
-                let dst_int = u32::from_be_bytes(dst_addr.octets());
-                let nh_addr: Ipv4Addr = nh.parse()?;
-                let nh_int = u32::from_be_bytes(nh_addr.octets());
-                if let Some(nh_map) = xdp_encap_bpf.map_mut("NEXTHOP"){
-                    let mut nh_map: HashMap<_, u32, u32> = HashMap::try_from(nh_map)?;
-                    nh_map.insert(&dst_int, &nh_int, 0)?;
-                } else {
-                    warn!("NEXTHOP map not found");
-                }
-            }
-
-            for (dst, intf) in &interface_map{;
-                if let Some(intf_map) = xdp_encap_bpf.map_mut("INTERFACE"){
-                    let mut intf_map: HashMap<_, u32, Interface> = HashMap::try_from(intf_map)?;
-                    intf_map.insert(dst, intf, 0)?;
-                } else {
-                    warn!("INTERFACE map not found");
-                }
-            }
-
-            if let Some(phy_ip) = xdp_encap_bpf.map_mut("PHYIP"){
-                let mut phy_ip: HashMap<_, u8, u32> = HashMap::try_from(phy_ip)?;
-                phy_ip.insert(&0, &phy_intf_addr, 0)?;
-            } else {
-                warn!("DEVMAP map not found");
-            }
-            
-        },
-        Mode::Dummy => {
-            info!("dummy mode");
-            if let Err(e) = BpfLogger::init(&mut xdp_dummy_bpf) {
-                // This can happen if you remove all log statements from your eBPF program.
-                warn!("failed to initialize eBPF logger: {}", e);
-            }
-            let xdp_program: &mut Xdp = xdp_dummy_bpf.program_mut("xdp_dummy").unwrap().try_into()?;
-            xdp_program.load()?;
-            xdp_program.attach(&opt.iface, XdpFlags::DRV_MODE)
-                .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;           
-        }
-        Mode::Decap => {
-            info!("decap mode");
-            if let Err(e) = BpfLogger::init(&mut xdp_decap_bpf) {
-                // This can happen if you remove all log statements from your eBPF program.
-                warn!("failed to initialize eBPF logger: {}", e);
-            }
-            let xdp_program: &mut Xdp = xdp_decap_bpf.program_mut("xdp_decap").unwrap().try_into()?;
-            xdp_program.load()?;
-            xdp_program.attach(&opt.iface, XdpFlags::DRV_MODE)
-                .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
-            for (dst, intf) in &interface_map{;
-                if let Some(intf_map) = xdp_decap_bpf.map_mut("INTERFACE"){
-                    let mut intf_map: HashMap<_, u32, Interface> = HashMap::try_from(intf_map)?;
-                    intf_map.insert(dst, intf, 0)?;
-                } else {
-                    warn!("INTERFACE map not found");
-                }
-            }
-        },
+    if let Err(e) = BpfLogger::init(&mut xdp_dummy_bpf) {
+        // This can happen if you remove all log statements from your eBPF program.
+        warn!("failed to initialize eBPF logger: {}", e);
     }
-
-
-
-
-
-    /*
-    if let Some(links) = tc_bpf.map_mut("LINKS"){
-        let mut link_map: HashMap<_, u16, u16> = HashMap::try_from(links)?;
-        link_map.insert(&0, &opt.links, 0)?;
-    } else {
-        warn!("LINKS map not found");
-    }
-
-    if let Some(counter) = tc_bpf.map_mut("COUNTER"){
-        let mut counter_map: HashMap<_, u16, u16> = HashMap::try_from(counter)?;
-        counter_map.insert(&0, &0, 0)?;
-    } else {
-        warn!("COUNTER map not found");
-    }
-    
-    if let Some(port_list) = tc_bpf.map_mut("PORTS"){
-        let mut port_map: HashMap<_, u16, u16> = HashMap::try_from(port_list)?;
-        for link in 0..opt.links{
-            let port = 1000 + link;
-            port_map.insert(&link, &port,0)?;
-        }
-    } else {
-        warn!("PORTS map not found");
-    }
-    */
-    
-    
-
-    info!("Waiting for Ctrl-C...");
-    signal::ctrl_c().await?;
-    info!("Exiting...");
-
+    let xdp_program: &mut Xdp = xdp_dummy_bpf.program_mut("xdp_dummy").unwrap().try_into()?;
+    xdp_program.load()?;
+    xdp_program.attach(&dummy_intf, XdpFlags::DRV_MODE)
+        .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
     Ok(())
 }
 
@@ -296,6 +279,28 @@ fn get_interface_index(interface_name: &str) -> Result<u32, Error> {
     } else {
         Ok(interface_index)
     }
+}
+
+fn get_mac_addresses_and_interface_index(interface_name: &str) -> Option<([u8; 6], u32)> {
+    if let Ok(ifaddrs) = getifaddrs() {
+        for ifaddr in ifaddrs {
+            if ifaddr.interface_name == interface_name {
+                let interface_index = match get_interface_index(&ifaddr.interface_name) {
+                    Ok(index) => index,
+                    Err(_) => continue,
+                };
+                if let Some(address) = ifaddr.address {
+                    if let Some(link_address) = address.as_link_addr(){
+                        if let Some(mac) = link_address.addr(){
+                            return Some((mac, interface_index));
+                        }
+                    }
+                }
+            }
+
+        }
+    }
+    None
 }
 
 fn get_mac_addresses_and_interface_indexes() -> Vec<([u8; 6], u32)> {

@@ -11,4 +11,4 @@ copy:
 	(scp \
 	  sprayer/target/aarch64-unknown-linux-musl/release/sprayer \
 	  target/aarch64-unknown-linux-musl/release/server \
-	  192.168.105.5:)
+	  192.168.105.6:)

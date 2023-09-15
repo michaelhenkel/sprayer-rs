@@ -2,20 +2,10 @@
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct NetworkKey {
-    pub prefix: u32,
-    pub prefix_len: u8
-}
-
-#[cfg(feature = "user")]
-unsafe impl aya::Pod for NetworkKey {}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
 pub struct Interface {
     pub mac: [u8;6],
     pub ifidx: u32,
-    pub next_hop: u32,
+    pub ip: u32,
 }
 
 #[cfg(feature = "user")]
