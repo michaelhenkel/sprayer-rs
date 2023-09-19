@@ -67,3 +67,8 @@ sudo ip link del fabric
 bpftrace -e \
 'tracepoint:xdp:xdp_redirect*_err {@redir_errno[-args->err] = count();}
 tracepoint:xdp:xdp_devmap_xmit {@devmap_errno[-args->err] = count();}'
+
+bpftrace -e 'tracepoint:xdp:* { @cnt[probe] = count(); }'
+
+
+ssh 192.168.105.6 "sudo ip netns exec r1 tcpdump -U -nni r1_link2 -w -" | wireshark -k -i -

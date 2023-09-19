@@ -147,6 +147,20 @@ async fn main() -> Result<(), anyhow::Error> {
             warn!("DECAPINTERFACE map not found");
         }
 
+        if let Some(links_map) = xdp_encap_bpf.map_mut("LINKS"){
+            let mut links_map: HashMap<_, u8, u8> = HashMap::try_from(links_map)?;
+            links_map.insert(&0, &links, 0)?;
+        } else {
+            warn!("LINKS map not found");
+        }
+
+        if let Some(counter_map) = xdp_encap_bpf.map_mut("COUNTER"){
+            let mut counter_map: HashMap<_, u8, u8> = HashMap::try_from(counter_map)?;
+            counter_map.insert(&0, &0, 0)?;
+        } else {
+            warn!("COUNTER map not found");
+        }
+
         if let Err(e) = BpfLogger::init(&mut xdp_decap_bpf) {
             // This can happen if you remove all log statements from your eBPF program.
             warn!("failed to initialize eBPF logger: {}", e);

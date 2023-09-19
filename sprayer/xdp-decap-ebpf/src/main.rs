@@ -33,7 +33,7 @@ pub fn xdp_decap(ctx: XdpContext) -> u32 {
             intf
         }
         None => {
-            info!(&ctx, "encap intf not found");
+            //info!(&ctx, "encap intf not found");
             return xdp_action::XDP_ABORTED
         }
     };
@@ -44,7 +44,7 @@ pub fn xdp_decap(ctx: XdpContext) -> u32 {
 }
 
 fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
-    info!(&ctx, "xdp_decap, encap int {}", encap_intf.ifidx);
+    //info!(&ctx, "xdp_decap, encap int {}", encap_intf.ifidx);
     let eth = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
     if unsafe{ (*eth).ether_type } != EtherType::Ipv4 {
         return Ok(xdp_action::XDP_PASS);
@@ -69,15 +69,12 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
         };
         unsafe { (*inner_eth).src_addr = flow_next_hop.src_mac };
         unsafe { (*inner_eth).dst_addr = flow_next_hop.dst_mac };
-        let inner_ip = ptr_at_mut::<Ipv4Hdr>(&ctx, EthHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
-        let dst_ip = unsafe { (*inner_ip).dst_addr };
-        info!(&ctx,"dst_ip: {:i}", u32::from_be(dst_ip));
         unsafe { bpf_redirect(encap_intf.ifidx, 0) }
 
     } else {
         xdp_action::XDP_PASS.into()
     };
-    info!(&ctx, "redirect res: {}", res);
+    //info!(&ctx, "redirect res: {}", res);
     Ok(res as u32)
 }
 
