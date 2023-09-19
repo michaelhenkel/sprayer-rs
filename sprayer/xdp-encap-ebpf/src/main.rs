@@ -99,7 +99,6 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
     
     let outer_ip_hdr_len = u16::from_be( unsafe { (*ipv4_hdr).tot_len }) + (EthHdr::LEN  + Ipv4Hdr::LEN + UdpHdr::LEN) as u16;
     
-    
     let ttl = unsafe { (*ipv4_hdr).ttl - 1};
     let bitfield_1 = unsafe { (*ipv4_hdr)._bitfield_1 };
     let bitfield_align_1 = unsafe { (*ipv4_hdr)._bitfield_align_1 };
@@ -126,27 +125,8 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
     let ip_csum = csum(&outer_ip_hdr.clone() as *const Ipv4Hdr as *mut u32, Ipv4Hdr::LEN as u32, 0);
     outer_ip_hdr.check = ip_csum;
 
-    //let c = outer_ip_hdr.clone();
 
-
-
-    /*
-    let mut outer_ip_hdr = Ipv4Hdr{
-        _bitfield_1: unsafe { (*ipv4_hdr)._bitfield_1 },
-        _bitfield_align_1: unsafe{ (*ipv4_hdr)._bitfield_align_1 },
-        tos: unsafe { (*ipv4_hdr).tos },
-        frag_off: unsafe { (*ipv4_hdr).frag_off },
-        tot_len: u16::to_be(outer_ip_hdr_len),
-        id: unsafe { (*ipv4_hdr).id },
-        ttl,
-        proto: IpProto::Udp,
-        check: 0,
-        src_addr: unsafe { (*ipv4_hdr).src_addr },
-        dst_addr: unsafe { (*ipv4_hdr).dst_addr },
-    };
-    */
-
-    let counter = match unsafe { COUNTER.get(&0) } {
+    let counter = match unsafe { COUNTER.get_ptr_mut(&0) } {
         Some(counter) => {
             counter
         }
@@ -156,11 +136,13 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
         }
     };
 
-    let current_counter = *counter;
-    info!(&ctx, "current_counter: {}", current_counter);
-    let src_port = 1000 + current_counter as u16;
-
-    info!(&ctx, "src_port: {}", src_port.clone());
+    let mut current_counter = unsafe { *counter };
+    let src_port_counter = if current_counter > 0 {
+        current_counter+2
+    } else {
+        0
+    };
+    let src_port = 1000 + src_port_counter as u16;
 
     let outer_udp_hdr_len = outer_ip_hdr_len - Ipv4Hdr::LEN as u16;
     let outer_udp_hdr = UdpHdr{
@@ -170,50 +152,13 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
         check: 0,
     };
 
-    
-    info!(&ctx, "links: {}", links);
-    let new_counter: u8 = if current_counter == links - 1{
+    current_counter = if current_counter == links - 1{
         0
     } else {
         current_counter + 1
     };
-    info!(&ctx, "new_counter: {}", new_counter);
-    let res = unsafe { COUNTER.insert(&0, &new_counter, 0) };
-    match res {
-        Ok(_) => {},
-        Err(_) => {
-            info!(&ctx, "counter insert failed");
-            return Ok(xdp_action::XDP_ABORTED)
-        }
-    }
 
-    let updated_counter = match unsafe { COUNTER.get(&0) } {
-        Some(counter) => {
-            counter
-        }
-        None => {
-            info!(&ctx, "counter");
-            return Ok(xdp_action::XDP_ABORTED)
-        }
-    };
-    let updated_counter = *updated_counter;
-    
-    info!(&ctx, "updated_counter: {}", updated_counter);
-
-
-    //let udp_csum = csum(&outer_udp_hdr as *const UdpHdr as *mut u32, UdpHdr::LEN as u32, 0);
-    //outer_udp_hdr.check = udp_csum;
-
-    /*
-    let src_mac = mac_to_int( outer_eth_hdr.src_addr);
-    let dst_mac = mac_to_int(outer_eth_hdr.dst_addr);
-    let src_ip = u32::from_be(outer_ip_hdr.src_addr);
-    let dst_ip = u32::from_be(outer_ip_hdr.dst_addr);
-    let src_port = u16::from_be(outer_udp_hdr.source);
-    let dst_port = u16::from_be(outer_udp_hdr.dest);
-    info!(&ctx, "src_mac: {:x}, dst_mac: {:x}, src_ip: {:i}, dst_ip: {:i}, src_port: {}, dst_port: {}", src_mac, dst_mac, src_ip, dst_ip, src_port, dst_port);
-    */
-
+    unsafe { *counter = current_counter };
     unsafe {
         bpf_xdp_adjust_head(ctx.ctx, -((EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as i32));
     }
@@ -226,7 +171,6 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
     unsafe { outer_udp_ptr.write(outer_udp_hdr); };
 
     let res = unsafe { bpf_redirect(decap_intf.ifidx, 0) };
-    //info!(&ctx, "redirect res: {} to ifidx {}", res, decap_intf.ifidx);
     Ok(res as u32)
 }
 
