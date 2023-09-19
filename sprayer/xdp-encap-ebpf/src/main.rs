@@ -6,7 +6,7 @@ use core::mem::{self, zeroed, size_of};
 use aya_bpf::{
     bindings::{xdp_action, bpf_fib_lookup as fib_lookup},
     macros::{xdp, map},
-    helpers::{bpf_xdp_adjust_head, bpf_redirect, bpf_fib_lookup},
+    helpers::{bpf_xdp_adjust_head, bpf_redirect, bpf_fib_lookup, bpf_csum_diff},
     programs::XdpContext,
     maps::HashMap, cty::c_void,
 };
@@ -16,16 +16,8 @@ use network_types::{
     ip::{Ipv4Hdr, IpProto},
     udp::UdpHdr,
 };
-use common::{Interface, FlowKey, FlowNextHop};
+use common::{Interface, FlowKey, FlowNextHop, SrcDst};
 
-#[repr(C, packed)]
-#[derive(Debug, Copy, Clone)]
-struct SrcDst{
-    src_ip: u32,
-    dst_ip: u32,
-    src_port: u16,
-    dst_port: u16,
-}
 
 #[map(name = "DECAPINTERFACE")]
 static mut DECAPINTERFACE: HashMap<u32, Interface> =
@@ -79,25 +71,35 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface) -> Result<u32, u32> {
         return Ok(xdp_action::XDP_PASS);
     };
 
+
     let outer_eth_hdr = EthHdr{
         dst_addr: flow_next_hop.dst_mac,
         src_addr: flow_next_hop.src_mac,
         ether_type: EtherType::Ipv4,
     };
+    let ttl = unsafe { (*ipv4_hdr).ttl - 1};
     let outer_ip_hdr_len = u16::from_be( unsafe { (*ipv4_hdr).tot_len }) + (EthHdr::LEN  + Ipv4Hdr::LEN + UdpHdr::LEN) as u16;
-    let outer_ip_hdr = Ipv4Hdr{
+    
+    let mut outer_ip_hdr = Ipv4Hdr{
         _bitfield_1: unsafe { (*ipv4_hdr)._bitfield_1 },
         _bitfield_align_1: unsafe{ (*ipv4_hdr)._bitfield_align_1 },
         tos: unsafe { (*ipv4_hdr).tos },
         frag_off: unsafe { (*ipv4_hdr).frag_off },
         tot_len: u16::to_be(outer_ip_hdr_len),
         id: unsafe { (*ipv4_hdr).id },
-        ttl: unsafe { (*ipv4_hdr).ttl },
+        ttl,
         proto: IpProto::Udp,
-        check: unsafe{ (*ipv4_hdr).check },
+        check: 0,
         src_addr: unsafe { (*ipv4_hdr).src_addr },
         dst_addr: unsafe { (*ipv4_hdr).dst_addr },
     };
+
+    let c = outer_ip_hdr.clone();
+
+    let ip_csum = csum(&c as *const Ipv4Hdr as *mut u32, Ipv4Hdr::LEN as u32, 0);
+    outer_ip_hdr.check = ip_csum;
+    
+
     let outer_udp_hdr_len = outer_ip_hdr_len - Ipv4Hdr::LEN as u16;
     let outer_udp_hdr = UdpHdr{
         source: u16::to_be(1000),
@@ -106,7 +108,10 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface) -> Result<u32, u32> {
         check: 0,
     };
 
-    let src_mac = mac_to_int(outer_eth_hdr.src_addr);
+    //let udp_csum = csum(&outer_udp_hdr as *const UdpHdr as *mut u32, UdpHdr::LEN as u32, 0);
+    //outer_udp_hdr.check = udp_csum;
+
+    let src_mac = mac_to_int( outer_eth_hdr.src_addr);
     let dst_mac = mac_to_int(outer_eth_hdr.dst_addr);
     let src_ip = u32::from_be(outer_ip_hdr.src_addr);
     let dst_ip = u32::from_be(outer_ip_hdr.dst_addr);
@@ -126,7 +131,7 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface) -> Result<u32, u32> {
     unsafe { outer_udp_ptr.write(outer_udp_hdr); };
 
     let res = unsafe { bpf_redirect(decap_intf.ifidx, 0) };
-    info!(&ctx, "redirect res: {}", res);
+    info!(&ctx, "redirect res: {} to ifidx {}", res, decap_intf.ifidx);
     Ok(res as u32)
 }
 
@@ -138,6 +143,23 @@ fn mac_to_int(mac: [u8;6]) -> u64 {
         mac_dec = mac_dec | mac[i] as u64;
     }
     mac_dec
+}
+
+#[inline(always)]
+fn csum(data_start: *mut u32, data_size: u32, csum: u32) -> u16 {
+    let cs = unsafe { bpf_csum_diff(0 as *mut u32, 0, data_start, data_size, csum) };
+    csum_fold_helper(cs)
+}
+
+#[inline(always)]
+fn csum_fold_helper(csum: i64) -> u16 {
+    let mut sum = csum;
+    for _ in 0..4 {
+        if sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+    }
+    !sum as u16
 }
 
 #[inline(always)]

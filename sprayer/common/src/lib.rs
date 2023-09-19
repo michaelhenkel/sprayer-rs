@@ -36,3 +36,12 @@ pub struct FlowNextHop {
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for FlowNextHop {}
+
+#[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
+pub struct SrcDst{
+    pub src_ip: u32,
+    pub dst_ip: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
+}
