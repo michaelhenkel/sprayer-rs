@@ -72,3 +72,34 @@ bpftrace -e 'tracepoint:xdp:* { @cnt[probe] = count(); }'
 
 
 ssh 192.168.105.6 "sudo ip netns exec r1 tcpdump -U -nni r1_link2 -w -" | wireshark -k -i -
+
+
+init_c1=$(ip -s l show dev r1_link1 |grep RX -A1|tail -1 |awk '{print $1}')
+init_c2=$(ip -s l show dev r1_link2 |grep RX -A1|tail -1 |awk '{print $1}')
+while true;
+do
+	c1=$(ip -s l show dev r1_link1 |grep RX -A1|tail -1 |awk '{print $1}')
+	c2=$(ip -s l show dev r1_link2 |grep RX -A1|tail -1 |awk '{print $1}')
+	echo r1_link1: $((${c1}-${init_c1}))
+	echo r1_link2: $((${c2}-${init_c2}))
+	sleep 1
+	clear
+done
+
+tc qdisc add dev r2_link1 root netem delay 120ms
+tc qdisc add dev r2_link2 root netem delay 130ms
+tc qdisc add dev r2_link3 root netem delay 140ms
+
+
+tc qdisc del dev r2_link1 root netem
+tc qdisc del dev r2_link2 root netem
+tc qdisc del dev r2_link3 root netem
+
+tc qdisc add dev r1_link1 root netem delay 120ms
+tc qdisc add dev r1_link2 root netem delay 130ms
+tc qdisc add dev r1_link3 root netem delay 140ms
+
+
+tc qdisc del dev r1_link1 root netem
+tc qdisc del dev r1_link2 root netem
+tc qdisc del dev r1_link3 root netem

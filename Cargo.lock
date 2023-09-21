@@ -18,6 +18,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f26201604c87b1e01bd3d98f8d5d9a8fcbb815e8cedb41ffccbeb4bf593a35fe"
 
 [[package]]
+name = "afxdp"
+version = "0.4.0"
+source = "git+https://github.com/aterlo/afxdp-rs#aca8a16e66467aabbce9f49dbb09dc3475de0330"
+dependencies = [
+ "arraydeque",
+ "errno 0.2.8",
+ "libbpf-sys",
+ "libc",
+ "thiserror",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -98,6 +110,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4668cab20f66d8d020e1fbc0ebe47217433c1b6c8f2040faf858554e394ace6"
 
 [[package]]
+name = "arraydeque"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0ffd3d69bd89910509a5d31d1f1353f38ccffdd116dd0099bbd6627f7bd8ad8"
+
+[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -106,7 +124,7 @@ checksum = "d468802bab17cbc0cc575e9b053f41e72aa36bfa6b7f55e3529ffa43161b97fa"
 [[package]]
 name = "aya"
 version = "0.11.0"
-source = "git+https://github.com/aya-rs/aya#f0f09ac16ed040ca19a0d852af7df2cb3497745c"
+source = "git+https://github.com/aya-rs/aya#42fd82e32b85715df78508ef77f79eb8c2edd890"
 dependencies = [
  "aya-obj",
  "bitflags 2.4.0",
@@ -120,9 +138,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "aya-bpf"
+version = "0.1.0"
+source = "git+https://github.com/aya-rs/aya#42fd82e32b85715df78508ef77f79eb8c2edd890"
+dependencies = [
+ "aya-bpf-bindings",
+ "aya-bpf-cty",
+ "aya-bpf-macros",
+ "rustversion",
+]
+
+[[package]]
+name = "aya-bpf-bindings"
+version = "0.1.0"
+source = "git+https://github.com/aya-rs/aya#42fd82e32b85715df78508ef77f79eb8c2edd890"
+dependencies = [
+ "aya-bpf-cty",
+]
+
+[[package]]
+name = "aya-bpf-cty"
+version = "0.2.1"
+source = "git+https://github.com/aya-rs/aya#42fd82e32b85715df78508ef77f79eb8c2edd890"
+
+[[package]]
+name = "aya-bpf-macros"
+version = "0.1.0"
+source = "git+https://github.com/aya-rs/aya#42fd82e32b85715df78508ef77f79eb8c2edd890"
+dependencies = [
+ "proc-macro-error",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "aya-log"
 version = "0.1.13"
-source = "git+https://github.com/aya-rs/aya#f0f09ac16ed040ca19a0d852af7df2cb3497745c"
+source = "git+https://github.com/aya-rs/aya#42fd82e32b85715df78508ef77f79eb8c2edd890"
 dependencies = [
  "aya",
  "aya-log-common",
@@ -135,7 +188,7 @@ dependencies = [
 [[package]]
 name = "aya-log-common"
 version = "0.1.13"
-source = "git+https://github.com/aya-rs/aya#f0f09ac16ed040ca19a0d852af7df2cb3497745c"
+source = "git+https://github.com/aya-rs/aya#42fd82e32b85715df78508ef77f79eb8c2edd890"
 dependencies = [
  "num_enum",
 ]
@@ -143,7 +196,7 @@ dependencies = [
 [[package]]
 name = "aya-obj"
 version = "0.1.0"
-source = "git+https://github.com/aya-rs/aya#f0f09ac16ed040ca19a0d852af7df2cb3497745c"
+source = "git+https://github.com/aya-rs/aya#42fd82e32b85715df78508ef77f79eb8c2edd890"
 dependencies = [
  "bytes",
  "core-error",
@@ -261,6 +314,7 @@ name = "common"
 version = "0.1.0"
 dependencies = [
  "aya",
+ "aya-bpf",
 ]
 
 [[package]]
@@ -312,6 +366,17 @@ dependencies = [
  "log",
  "regex",
  "termcolor",
+]
+
+[[package]]
+name = "errno"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f639046355ee4f37944e44f60642c6f3a7efa3cf6b78c78a0d989a8ce6c396a1"
+dependencies = [
+ "errno-dragonfly",
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -446,6 +511,16 @@ name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
+
+[[package]]
+name = "libbpf-sys"
+version = "0.7.1+v0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58f827f39ef9181560ee49c82bbdc8e8441c56404f62dc6eef1384113fd4c268"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
 
 [[package]]
 name = "libc"
@@ -676,6 +751,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
+name = "pkg-config"
+version = "0.3.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26072860ba924cbfa98ea39c8c19b4dd6a4a25423dbdf219c1eca91aa0cf6964"
+
+[[package]]
 name = "pnet"
 version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -767,6 +848,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-error"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da25490ff9892aab3fcf7c36f08cfb902dd3e71ca0f9f9517bea02a73a5ce38c"
+dependencies = [
+ "proc-macro-error-attr",
+ "proc-macro2",
+ "quote",
+ "version_check",
+]
+
+[[package]]
+name = "proc-macro-error-attr"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1be40180e52ecc98ad80b184934baf3d0d29f979574e439af5a55274b35f869"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "version_check",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -841,11 +945,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0c3dde1fc030af041adc40e79c0e7fbcf431dd24870053d187d7c66e4b87453"
 dependencies = [
  "bitflags 2.4.0",
- "errno",
+ "errno 0.3.3",
  "libc",
  "linux-raw-sys",
  "windows-sys",
 ]
+
+[[package]]
+name = "rustversion"
+version = "1.0.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ffc183a10b4478d04cbbbfc96d0873219d962dd5accaff2ffbd4ceb7df837f4"
 
 [[package]]
 name = "ryu"
@@ -940,13 +1050,16 @@ dependencies = [
 name = "sprayer"
 version = "0.1.0"
 dependencies = [
+ "afxdp",
  "anyhow",
  "aya",
+ "aya-bpf",
  "aya-log",
  "clap",
  "common",
  "env_logger",
  "interfaces",
+ "libbpf-sys",
  "libc",
  "log",
  "nix 0.27.1",

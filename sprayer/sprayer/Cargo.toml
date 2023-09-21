@@ -10,12 +10,15 @@ aya-log = { git = "https://github.com/aya-rs/aya" }
 clap = { version = "4.1", features = ["derive"] }
 common = { path = "../common", features = ["user"] }
 anyhow = "1"
+aya-bpf = { git = "https://github.com/aya-rs/aya" }
 env_logger = "0.10"
 libc = "0.2"
 log = "0.4"
 tokio = { version = "1.25", features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
 interfaces = "0.0.9"
 nix = { version = "0.27.1", features = ["net"] }
+afxdp = { git = "https://github.com/aterlo/afxdp-rs" }
+libbpf-sys = "1.2.1+v1.2.0"
 
 [[bin]]
 name = "sprayer"

@@ -16,7 +16,14 @@ use network_types::{
     ip::{Ipv4Hdr, IpProto},
     udp::UdpHdr,
 };
-use common::{Interface, FlowKey, FlowNextHop, SrcDst};
+use common::{
+    Interface,
+    FlowKey,
+    FlowNextHop,
+    SrcDst,
+    BthHdr,
+    XskMap,
+};
 
 #[map(name = "LINKS")]
 static mut LINKS: HashMap<u8, u8> =
@@ -63,7 +70,6 @@ pub fn xdp_encap(ctx: XdpContext) -> u32 {
     }
 }
 
-
 fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u32, u32> {
     //info!(&ctx, "encap packet");
     let eth_hdr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
@@ -74,13 +80,22 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
         }
     }
     let ipv4_hdr = ptr_at_mut::<Ipv4Hdr>(&ctx, EthHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
-    match  unsafe { (*ipv4_hdr).proto } {
-        IpProto::Tcp => {},
-        IpProto::Udp => {},
+    let psn_seq = match  unsafe { (*ipv4_hdr).proto } {
+        IpProto::Udp => {
+            let udp_hdr = ptr_at_mut::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+            if unsafe { u16::from_be((*udp_hdr).dest) } == 4791 {
+                let bth_hdr = ptr_at_mut::<BthHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+                unsafe { (*bth_hdr).psn_seq }
+            } else {
+                return Ok(xdp_action::XDP_PASS);
+            }
+        },
         _ => {
             return Ok(xdp_action::XDP_PASS);
         }
-    }
+    };
+
+    let udp_src_port = u16::from(psn_seq[1]) << 8 | u16::from(psn_seq[2]);
 
     let flow_next_hop = if let Some(flow_next_hop) = get_v4_next_hop_from_flow_table(&ctx){
         flow_next_hop
@@ -125,7 +140,7 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
     let ip_csum = csum(&outer_ip_hdr.clone() as *const Ipv4Hdr as *mut u32, Ipv4Hdr::LEN as u32, 0);
     outer_ip_hdr.check = ip_csum;
 
-
+    /*
     let counter = match unsafe { COUNTER.get_ptr_mut(&0) } {
         Some(counter) => {
             counter
@@ -143,15 +158,17 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
         0
     };
     let src_port = 1000 + src_port_counter as u16;
+    */
 
     let outer_udp_hdr_len = outer_ip_hdr_len - Ipv4Hdr::LEN as u16;
     let outer_udp_hdr = UdpHdr{
-        source: u16::to_be(src_port),
+        source: hash_16bit(udp_src_port),
         dest: u16::to_be(3000),
         len: u16::to_be(outer_udp_hdr_len),
         check: 0,
     };
 
+    /*
     current_counter = if current_counter == links - 1{
         0
     } else {
@@ -159,6 +176,7 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
     };
 
     unsafe { *counter = current_counter };
+    */
     unsafe {
         bpf_xdp_adjust_head(ctx.ctx, -((EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as i32));
     }
@@ -172,6 +190,17 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
 
     let res = unsafe { bpf_redirect(decap_intf.ifidx, 0) };
     Ok(res as u32)
+}
+
+#[inline(always)]
+fn hash_16bit(num: u16) -> u16 {
+    let mut hash = num;
+    hash = (hash ^ (hash >> 8)).wrapping_mul(0x00FF);
+    hash = (hash ^ (hash >> 5)).wrapping_mul(0x5BD1);
+    hash = hash ^ (hash >> 3);
+    hash = hash ^ (hash >> 2);
+    hash = hash ^ (hash >> 1);
+    hash
 }
 
 #[inline(always)]
