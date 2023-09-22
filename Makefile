@@ -1,12 +1,12 @@
 .PHONY: sprayer  server
 ARCH := aarch64
-all: sprayer server
+all: sprayer
 sprayer: ebpf
-	(cd sprayer; cargo build --release --target=${ARCH}-unknown-linux-gnu)
+	(cd sprayer; CARGO_TARGET_DIR=/tmp/lima cargo build --release --target=${ARCH}-unknown-linux-gnu)
 ebpf:
-	(cd sprayer;cargo xtask build-ebpf --release)
+	(cd sprayer; CARGO_TARGET_DIR=/tmp/lima cargo xtask build-ebpf --release)
 server:
-	(cd server;cargo build --release --target=${ARCH}-unknown-linux-gnu)
+	(cd server; CARGO_TARGET_DIR=~ cargo build --release --target=${ARCH}-unknown-linux-gnu)
 copy:
 	(scp \
 	  sprayer/target/aarch64-unknown-linux-musl/release/sprayer \

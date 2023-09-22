@@ -29,6 +29,7 @@ use afxdp::PENDING_LEN;
 use afxdp::{buf::Buf, buf_pool::BufPool};
 use afxdp::{buf_mmap::BufMmap, buf_pool_vec::BufPoolVec};
 use libbpf_sys::{XSK_RING_CONS__DEFAULT_NUM_DESCS, XSK_RING_PROD__DEFAULT_NUM_DESCS};
+use std::cmp::min;
 
 const BUF_NUM: usize = 65536;
 const BUF_LEN: usize = 4096;
@@ -209,8 +210,15 @@ async fn main() -> Result<(), anyhow::Error> {
         } else {
             warn!("ENCAPINTERFACE map not found");
         }
+        let d = decap_intf.clone();
+        let mut xdp_worker = get_socket(d);
+        let res = tokio::spawn(async move {
+            xdp_worker.run().await;
+        });
 
-        let xdp_worker = get_socket(&decap_intf);
+        res.await?;
+
+
         /* 
         let (mut tx_queue, mut rx_queue, mut dev_desc) = get_socket(CString::new(decap_intf.clone()).unwrap());
         let tx_fd = tx_queue.fd().as_raw_fd() as u32;
@@ -269,7 +277,7 @@ fn get_socket(link_name: CString) -> (TxQueue, RxQueue, Vec<FrameDesc> ){
 }
 */
 
-fn get_socket(link_name: &str) -> XDPWorker{
+fn get_socket(link_name: String) -> XDPWorker<'static>{
     let options = MmapAreaOptions { huge_tlb: false };
     let r = MmapArea::new(BUF_NUM, BUF_LEN, options);
     let (area, mut bufs) = match r {
@@ -292,7 +300,7 @@ fn get_socket(link_name: &str) -> XDPWorker{
     sock_opts.copy_mode = true;
     let r = Socket::new(
         umem1.clone(),
-        link_name,
+        link_name.as_str(),
         0,
         XSK_RING_CONS__DEFAULT_NUM_DESCS,
         XSK_RING_PROD__DEFAULT_NUM_DESCS,
@@ -398,7 +406,7 @@ fn ip_to_dec(ip: &str) -> u32{
 }
 
 impl XDPWorker<'_> {
-    pub fn run(&mut self) {
+    pub async fn run(&mut self) {
         let mut v: ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping> = ArrayDeque::new();
         let custom = BufCustom {};
         let mut fq_deficit = 0;
@@ -443,12 +451,14 @@ impl XDPWorker<'_> {
             match r {
                 Ok(n) => {
                     if n > 0 {
-                        debug!("XDP worker {:?} Received {:?} packets", self.core, n);
+                        info!("XDP worker {:?} Received {:?} packets", self.core, n);
+                        /*
                         let r = self.process_packets(&mut v, &stats_sender);
                         match r {
                             Ok(_) => {}
                             Err(e) => error!("XDP: Problem processing packets: {:?}", e),
                         }
+                        */
                         fq_deficit += n;
                     } else {
                         if self.fq.needs_wakeup() {
@@ -457,7 +467,7 @@ impl XDPWorker<'_> {
                     }
                 }
                 Err(err) => {
-                    error!("XDP: {:?}", err);
+                    info!("XDP: {:?}", err);
                 }
             }
 
