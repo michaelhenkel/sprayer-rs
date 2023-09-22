@@ -17,8 +17,11 @@ log = "0.4"
 tokio = { version = "1.25", features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
 interfaces = "0.0.9"
 nix = { version = "0.27.1", features = ["net"] }
-afxdp = { git = "https://github.com/aterlo/afxdp-rs" }
-libbpf-sys = "1.2.1+v1.2.0"
+#libbpf-sys = "0.8.3"
+#xsk-rs = { git = "https://github.com/DouglasGray/xsk-rs" }
+libbpf-sys = "0.7.0+v0.7.0"
+afxdp = { git = "https://github.com/aterlo/afxdp-rs"}
+arraydeque = "0.5.1"
 
 [[bin]]
 name = "sprayer"
