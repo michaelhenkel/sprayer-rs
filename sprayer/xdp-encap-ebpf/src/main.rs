@@ -87,7 +87,8 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
                 let bth_hdr = ptr_at_mut::<BthHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
                 unsafe { (*bth_hdr).psn_seq }
             } else {
-                return Ok(xdp_action::XDP_PASS);
+                [1,2,3]
+                //return Ok(xdp_action::XDP_PASS);
             }
         },
         _ => {
@@ -163,7 +164,7 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
     let outer_udp_hdr_len = outer_ip_hdr_len - Ipv4Hdr::LEN as u16;
     let outer_udp_hdr = UdpHdr{
         source: hash_16bit(udp_src_port),
-        dest: u16::to_be(3000),
+        dest: u16::to_be(3001),
         len: u16::to_be(outer_udp_hdr_len),
         check: 0,
     };

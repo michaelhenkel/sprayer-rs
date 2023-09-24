@@ -6,9 +6,9 @@ use core::mem::{self, zeroed, size_of};
 use aya_bpf::{
     bindings::{xdp_action, bpf_fib_lookup as fib_lookup},
     macros::{xdp, map},
-    helpers::{bpf_xdp_adjust_head, bpf_redirect, bpf_fib_lookup},
+    helpers::{bpf_xdp_adjust_head, bpf_redirect, bpf_fib_lookup, bpf_redirect_map},
     programs::XdpContext,
-    maps::HashMap, cty::c_void,
+    maps::HashMap, cty::c_void, 
 };
 use aya_log_ebpf::{info, warn};
 use network_types::{
@@ -83,6 +83,7 @@ pub fn xdp_decap(ctx: XdpContext) -> u32 {
 }
 
 fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
+    //unsafe { (*ctx.ctx).rx_queue_index };
     //info!(&ctx, "xdp_decap, encap int {}", encap_intf.ifidx);
     let eth = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
     if unsafe{ (*eth).ether_type } != EtherType::Ipv4 {
@@ -113,16 +114,16 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
                 //first
                 if op_code == 0 {
                     if unsafe { (*prev_bth_ptr).opcode == 0} {
-                        buffer(&ctx, BufferReason::FirstAfterFirst);
+                        return Ok(buffer(&ctx, BufferReason::FirstAfterFirst));
                     } else if unsafe { (*prev_bth_ptr).opcode == 1} {
-                        buffer(&ctx, BufferReason::FirstAfterMiddle);
+                        return Ok(buffer(&ctx, BufferReason::FirstAfterMiddle));
                     } else if unsafe { (*prev_bth_ptr).opcode == 2} {
                         if unsafe { (*prev_bth_ptr).next_psn_seq } == psn_seq {
                             unsafe { (*prev_bth_ptr).next_psn_seq = psn_seq + 1 };
                             unsafe { (*prev_bth_ptr).opcode = op_code };
                             unsafe { (*prev_bth_ptr).first_psn_seq = psn_seq };
                         } else {
-                            buffer(&ctx, BufferReason::FirstPsnSeqMismatch);
+                            return Ok(buffer(&ctx, BufferReason::FirstPsnSeqMismatch));
                         }
                     }
                 //middle
@@ -133,11 +134,11 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
                             unsafe { (*prev_bth_ptr).next_psn_seq = psn_seq + 1 };
                             unsafe { (*prev_bth_ptr).opcode = op_code };
                         } else {
-                            buffer(&ctx, BufferReason::MiddlePsnSeqMismatch);
+                            return Ok(buffer(&ctx, BufferReason::MiddlePsnSeqMismatch));
                         }
                     // middle after last
                     } else if unsafe { (*prev_bth_ptr).opcode == 2} {
-                        buffer(&ctx, BufferReason::MiddleAfterLast);
+                        return Ok(buffer(&ctx, BufferReason::MiddleAfterLast));
                     } 
                 //last
                 } else if op_code == 2 {
@@ -147,11 +148,11 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
                             unsafe { (*prev_bth_ptr).next_psn_seq = psn_seq + 1 };
                             unsafe { (*prev_bth_ptr).opcode = op_code };
                         } else {
-                            buffer(&ctx, BufferReason::LastPsnSeqMismatch);
+                            return Ok(buffer(&ctx, BufferReason::LastPsnSeqMismatch));
                         }
                     // last after last
                     } else if unsafe { (*prev_bth_ptr).opcode == 2} {
-                        buffer(&ctx, BufferReason::LastAfterLast);
+                        return Ok(buffer(&ctx, BufferReason::LastAfterLast));
                     }
                     
                 } else {
@@ -170,16 +171,13 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
                         return Ok(xdp_action::XDP_ABORTED);
                     }
                 } else if op_code == 1 {
-                    buffer(&ctx, BufferReason::FirstMissingForMiddle);
+                    return Ok(buffer(&ctx, BufferReason::FirstMissingForMiddle));
                 } else if op_code == 2 {
-                    buffer(&ctx, BufferReason::FirstMissingForLast);
+                    return Ok(buffer(&ctx, BufferReason::FirstMissingForLast));
                 }
                 
             }
         }
-        
-
-
         let flow_next_hop = if let Some(flow_next_hop) = get_v4_next_hop_from_flow_table(&ctx){
             flow_next_hop
         } else if let Some(flow_next_hop) = get_next_hop(&ctx) {
@@ -191,7 +189,10 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
         unsafe { (*inner_eth).dst_addr = flow_next_hop.dst_mac };
         unsafe { bpf_redirect(encap_intf.ifidx, 0) }
 
-    } else {
+    } else if unsafe { u16::from_be((*udp).dest) } == 3001 {
+        return Ok(buffer(&ctx, BufferReason::FirstAfterFirst))
+    }
+    else {
         xdp_action::XDP_PASS.into()
     };
     //info!(&ctx, "redirect res: {}", res);
@@ -204,7 +205,7 @@ fn buffer(ctx: &XdpContext, buffer_reason: BufferReason) -> u32 {
     match unsafe { BUFFERCOUNTER.get_ptr_mut(&0) } {
         Some(counter_ptr) => {
             unsafe { *counter_ptr += 1 };
-            info!(ctx, "buffer counter: {}", unsafe { *counter_ptr })
+            info!(ctx, "buffer counter x: {}", unsafe { *counter_ptr })
         },
         None => {
             let counter = 1;
@@ -214,14 +215,10 @@ fn buffer(ctx: &XdpContext, buffer_reason: BufferReason) -> u32 {
         }
     }
     let idx = unsafe { (*ctx.ctx).rx_queue_index };
-    match unsafe { XSKMAP.get(&idx) } {
-        Some(ifidx) => {
-            unsafe { bpf_redirect(*ifidx, 0)};
-            return xdp_action::XDP_REDIRECT
-        },
-        None => {}
-    }
-    xdp_action::XDP_DROP
+    let map_ptr = unsafe { &mut XSKMAP as *mut _ as *mut c_void };
+    let redirect = unsafe { bpf_redirect_map(map_ptr, idx as u64, 0)};
+    info!(ctx, "redirect res: {} to idx", redirect);
+    return xdp_action::XDP_REDIRECT;
 }
 
 #[inline(always)]

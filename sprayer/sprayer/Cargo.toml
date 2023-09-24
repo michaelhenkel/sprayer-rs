@@ -5,8 +5,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
-aya = { git = "https://github.com/aya-rs/aya", features = ["async_tokio"] }
-aya-log = { git = "https://github.com/aya-rs/aya" }
+#aya = { git = "https://github.com/aya-rs/aya", features = ["async_tokio"] }
+aya = { path = "../../../aya/aya", features = ["async_tokio"] }
+aya-log = { path = "../../../aya/aya-log" }
 clap = { version = "4.1", features = ["derive"] }
 common = { path = "../common", features = ["user"] }
 anyhow = "1"
@@ -20,9 +21,10 @@ nix = { version = "0.27.1", features = ["net"] }
 #libbpf-sys = "0.8.3"
 #xsk-rs = { git = "https://github.com/DouglasGray/xsk-rs" }
 libbpf-sys = "0.7.0+v0.7.0"
-afxdp = { git = "https://github.com/aterlo/afxdp-rs"}
+afxdp = { path = "../../../afxdp-rs" }
 arraydeque = "0.4"
 core_affinity = "0.5"
+rlimit = "0.10.1"
 
 [[bin]]
 name = "sprayer"
