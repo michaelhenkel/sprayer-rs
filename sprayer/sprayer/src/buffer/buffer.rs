@@ -24,6 +24,7 @@ use libbpf_sys::{
 };
 use std::sync::{Arc, Mutex};
 use std::cmp::min;
+use std::slice;
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{Ipv4Hdr, IpProto},
@@ -88,8 +89,16 @@ impl Buffer {
                                 //if res.len() > 0 {
                                 //    self.sync_tx.send(res).await;
                                 //}
-                                tx.try_send(&mut rx_state.v, 64);
-                                rx_state.fq_deficit += n;
+                                for elem in rx_state.v.iter(){
+
+                                }
+                                if let Some(v) = rx_state.v.pop_front(){
+                                    self.parse(&v);
+                                    tx_state.v.push_front(v);
+                                    tx.try_send(&mut tx_state.v, 64);
+                                    rx_state.fq_deficit += n;
+                                }
+
                             } else {
                                 if rx_state.fq.needs_wakeup() {
                                     rx.wake();
@@ -103,43 +112,27 @@ impl Buffer {
 
                 }
             }
-            /*
-            match rx_state.socket {
-                SocketType::Rx(ref mut rx) => {
-                    let r = rx.try_recv(&mut rx_state.v, 64, custom);
-                    match r {
-                        Ok(n) => {
-                            if n > 0 {
-                                info!("received {} packets", n);
-                                //let res = self.process();
-                                //if res.len() > 0 {
-                                //    self.sync_tx.send(res).await;
-                                //}
-                                rx_state.fq_deficit += n;
-                            } else {
-                                if rx_state.fq.needs_wakeup() {
-                                    rx.wake();
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            panic!("error: {:?}", err);
-                        }
-                    }
-                    if rx_state.fq_deficit > 0 {
-                        let r = rx_state.fq.fill(&mut bufs, rx_state.fq_deficit);
-                        match r {
-                            Ok(n) => {
-                                rx_state.fq_deficit -= n;
-                            }
-                            Err(err) => panic!("error: {:?}", err),
-                        }
-                    }
-                },
-                _ => {},
-            }
-            */
         }
+    }
+
+    pub fn parse<'a>(&self, buf: &BufMmap<'a, BufCustom>) {
+        let data = buf.get_data();
+        let data_prt = data.as_ptr() as usize;
+        let eth_hdr = (data_prt + 0) as *const EthHdr;
+        let ipv4_hdr = (data_prt + EthHdr::LEN) as *const Ipv4Hdr;
+        let udp_hdr = (data_prt + EthHdr::LEN + Ipv4Hdr::LEN) as *const UdpHdr;
+        let udp_data_len = u16::from_be(unsafe { (*udp_hdr).len }) as usize;
+        let udp_src_port = u16::from_be(unsafe { (*udp_hdr).source });
+        info!("udp data len: {}", udp_data_len);
+        let udp_data_ptr = (data_prt + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const u8;
+        let s = unsafe { slice::from_raw_parts(udp_data_ptr, udp_data_len - UdpHdr::LEN) };
+        info!("udp data: {:?}", s);
+        let src_mac = mac_to_string( unsafe { &(*eth_hdr).src_addr });
+        let dst_mac = mac_to_string( unsafe { &(*eth_hdr).dst_addr });
+        let src_ip = decimal_to_ip(u32::from_be(unsafe { (*ipv4_hdr).src_addr }));
+        let dst_ip = decimal_to_ip(u32::from_be(unsafe { (*ipv4_hdr).dst_addr }));
+        info!("src_mac: {}, dst_mac: {}, src_ip: {}, dst_ip: {}", src_mac, dst_mac, src_ip, dst_ip);
+
     }
 }
 
@@ -234,293 +227,6 @@ impl <'a>State<'a>{
 pub enum SocketType<'a>{
     Rx(SocketRx<'a, BufCustom>),
     Tx(SocketTx<'a, BufCustom>),
-}
-
-pub struct NewBuffer {
-    ingress_intf: String,
-    egress_intf: String,
-    ingress_map_fd: i32,
-    egress_map_fd: i32,
-}
-
-impl NewBuffer {
-    pub fn new(ingress_intf: String, egress_intf: String, ingress_map_fd: i32, egress_map_fd: i32) -> NewBuffer {
-        NewBuffer{
-            ingress_intf,
-            egress_intf,
-            ingress_map_fd,
-            egress_map_fd,
-        }
-    }
-    pub async fn run(self) {
-        let (tx, rx) = mpsc::channel(1);
-        let mut rx_buffer = RxBuffer::new(self.ingress_intf, self.ingress_map_fd, tx);
-        let mut tx_buffer = TxBuffer::new(self.egress_intf, self.egress_map_fd);
-        let rx_res = tokio::spawn( async move{
-            rx_buffer.run().await;
-        });
-        
-        let tx_res = tokio::spawn( async move {
-            tx_buffer.run(rx).await;
-        });
-        let res = futures::join!(rx_res, tx_res);
-    }
-}
-
-pub struct RxBuffer<'a>{
-    cq: UmemCompletionQueue<'a, BufCustom>,
-    fq: UmemFillQueue<'a, BufCustom>,
-    rx: SocketRx<'a, BufCustom>,
-    bufs: Vec<BufMmap<'a, BufCustom>>,
-    v: ArrayDeque<[BufMmap<'a, BufCustom>; PENDING_LEN], Wrapping>,
-    fq_deficit: usize,
-    sync_tx: mpsc::Sender<Vec<u8>>,
-}
-
-impl <'a>RxBuffer<'a> {
-    pub fn new(intf: String, map_fd: i32, sync_tx: mpsc::Sender<Vec<u8>>) -> RxBuffer<'a> {
-        let intf = intf.as_str();
-        let options = MmapAreaOptions{ huge_tlb: false };
-        let map_area = MmapArea::new(65535, 2048, options);
-        let (area, mut bufs) = match map_area {
-            Ok((area, bufs)) => (area, bufs),
-            Err(err) => panic!("no mmap for you: {:?}", err),
-        };
-        
-    
-        let umem = Umem::new(
-            area.clone(),
-            XSK_RING_CONS__DEFAULT_NUM_DESCS,
-            XSK_RING_PROD__DEFAULT_NUM_DESCS,
-        );
-        let (umem1, umem1cq, mut umem1fq) = match umem {
-            Ok(umem) => umem,
-            Err(err) => panic!("no umem for you: {:?}", err),
-        };
-        let mut options = SocketOptions::default();
-        options.zero_copy_mode = false;
-        options.copy_mode = true;
-
-        let socket = Socket::new_rx(
-            umem1.clone(),
-            intf,
-            0,
-            XSK_RING_CONS__DEFAULT_NUM_DESCS,
-            options,
-            1
-        );
-        let (skt, rx) = match socket {
-            Ok(skt) => skt,
-            Err(err) => panic!("no socket for you: {:?}", err),
-        };
-
-        let r = umem1fq.fill(
-            &mut bufs,
-            min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, 65535),
-        );
-        match r {
-            Ok(n) => {
-                if n != min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, 65535) {
-                    panic!(
-                        "Initial fill of umem incomplete. Wanted {} got {}.",
-                        65535, n
-                    );
-                }
-            }
-            Err(err) => panic!("error: {:?}", err),
-        }
-
-        let xsk_sock = skt.socket.as_ref() as *const xsk_socket as *mut xsk_socket;        
-        unsafe { xsk_socket__update_xskmap(xsk_sock, map_fd) };
-
-        let mut v: ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping> = ArrayDeque::new();
-
-        RxBuffer{
-            cq: umem1cq,
-            fq: umem1fq,
-            rx,
-            bufs,
-            v,
-            fq_deficit: 0,
-            sync_tx,
-        }
-    }
-    pub async fn run(&mut self) {
-        let custom = BufCustom {};
-        loop {
-            let r = self.cq.service(&mut self.bufs, 64);
-            match r {
-                Ok(n) => {
-                    //info!("serviced {} packets", n)
-                }
-                Err(err) => panic!("error: {:?}", err),
-            }
-
-            let r = self.rx.try_recv(&mut self.v, 64, custom);
-            match r {
-                Ok(n) => {
-                    if n > 0 {
-                        info!("received {} packets", n);
-                        let res = self.process();
-                        if res.len() > 0 {
-                            self.sync_tx.send(res).await;
-                        }
-                        self.fq_deficit += n;
-                    } else {
-                        if self.fq.needs_wakeup() {
-                            self.rx.wake();
-                        }
-                    }
-                }
-                Err(err) => {
-                    panic!("error: {:?}", err);
-                }
-            }
-            if self.fq_deficit > 0 {
-                let r = self.fq.fill(&mut self.bufs, self.fq_deficit);
-                match r {
-                    Ok(n) => {
-                        self.fq_deficit -= n;
-                    }
-                    Err(err) => panic!("error: {:?}", err),
-                }
-            }
-        }
-    }
-    pub fn process(&mut self) -> Vec<u8>{
-        let mut tmp1: [u8; 12] = Default::default();
-        //self.sync_tx.send(self.v).await;
-        //let mut new_v: ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping> = ArrayDeque::new();
-        let mut res: Vec<u8> = Vec::new();
-        info!("v len: {:?}", self.v.len());
-        let buf = self.v.pop_front();
-        if let Some(buf) = buf {
-            let mut d = buf.get_data().to_vec();
-            res.append(&mut d);
-            info!("data: {:?}", d);
-            info!("data len: {:?}", d.len());
-        }
-        info!("v2 len: {:?}", self.v.len());
-        for buf in &mut self.v {
-            let cap = buf.get_capacity();
-            let data = buf.get_data();
-            let mut v2 = data.to_vec();
-            res.append(&mut v2);
-            //new_v.push_back(x);
-
-            let data = buf.get_data_mut();
-            let data_prt = data.as_ptr() as usize;
-            let eth_hdr = (data_prt + 0) as *const EthHdr;
-            let ipv4_hdr = (data_prt + EthHdr::LEN) as *const Ipv4Hdr;
-            let src_mac = mac_to_string( unsafe { &(*eth_hdr).src_addr });
-            let dst_mac = mac_to_string( unsafe { &(*eth_hdr).dst_addr });
-            let src_ip = decimal_to_ip(u32::from_be(unsafe { (*ipv4_hdr).src_addr }));
-            let dst_ip = decimal_to_ip(u32::from_be(unsafe { (*ipv4_hdr).dst_addr }));
-
-            info!("src_mac: {}", src_mac);
-            info!("dst_mac: {}", dst_mac);
-            info!("src_ip: {}", src_ip);
-            info!("dst_ip: {}", dst_ip);    
-            info!("data len: {:?}", data.len());
-        }
-        res
-    }
-}
-
-pub struct TxBuffer<'a>{
-    cq: UmemCompletionQueue<'a, BufCustom>,
-    fq: UmemFillQueue<'a, BufCustom>,
-    tx: SocketTx<'a, BufCustom>,
-    bufs: Vec<BufMmap<'a, BufCustom>>,
-    v: ArrayDeque<[BufMmap<'a, BufCustom>; PENDING_LEN], Wrapping>,
-    fq_deficit: usize,
-}
-
-impl <'a> TxBuffer<'a>{
-    pub fn new(intf: String, map_fd: i32) -> TxBuffer<'a> {
-        let intf = intf.as_str();
-        let options = MmapAreaOptions{ huge_tlb: false };
-        let map_area = MmapArea::new(65535, 2048, options);
-        let (area, mut bufs) = match map_area {
-            Ok((area, bufs)) => (area, bufs),
-            Err(err) => panic!("no mmap for you: {:?}", err),
-        };
-
-        let umem = Umem::new(
-            area.clone(),
-            XSK_RING_CONS__DEFAULT_NUM_DESCS,
-            XSK_RING_PROD__DEFAULT_NUM_DESCS,
-        );
-        let (umem1, umem1cq, mut umem1fq) = match umem {
-            Ok(umem) => umem,
-            Err(err) => panic!("no umem for you: {:?}", err),
-        };
-        let mut options = SocketOptions::default();
-        options.zero_copy_mode = false;
-        options.copy_mode = true;
-        let socket = Socket::new_tx(
-            umem1.clone(),
-            intf,
-            0,
-            XSK_RING_PROD__DEFAULT_NUM_DESCS,
-            options,
-            1
-        );
-        let (skt, tx) = match socket {
-            Ok(skt) => skt,
-            Err(err) => panic!("no socket for you: {:?}", err),
-        };
-        let r = umem1fq.fill(
-            &mut bufs,
-            min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, 65535),
-        );
-        match r {
-            Ok(n) => {
-                if n != min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, 65535) {
-                    panic!(
-                        "Initial fill of umem incomplete. Wanted {} got {}.",
-                        65535, n
-                    );
-                }
-            }
-            Err(err) => panic!("error: {:?}", err),
-        }
-
-        let xsk_sock = skt.socket.as_ref() as *const xsk_socket as *mut xsk_socket;        
-        unsafe { xsk_socket__update_xskmap(xsk_sock, map_fd) };
-
-        let mut v: ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping> = ArrayDeque::new();
-
-        TxBuffer{
-            cq: umem1cq,
-            fq: umem1fq,
-            tx,
-            bufs,
-            v,
-            fq_deficit: 0,
-        }
-    }
-    pub async fn run(mut self, mut sync_rx: mpsc::Receiver<Vec<u8>>) {
-        let custom = BufCustom {};
-        while let Some(mut x) = sync_rx.recv().await {
-            //self.fq.fill(bufs, batch_size)
-            let p = self.bufs.pop().unwrap();
-            self.v.push_back(p);
-            //for buf in self.bufs{
-            //    self.v.push_back(buf);
-            //}
-            
-            //let buf_custom = BufCustom{};
-            //let mut buf_map: &dyn BufPool<BufCustom, Vec<u8>> = BufVec::new(x.len(), buf_custom);
-            
-            //buf_map.put(&mut x, x.len());
-            //let mut v: ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping> = ArrayDeque::new();
-            //let bla: ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping> = ArrayDeque::from(x);
-            info!("received: {:?}",x);
-            //self.tx.try_send(&mut x, 64);
-            info!("received sync");
-        };
-    }
 }
 
 fn decimal_to_ip(decimal: u32) -> String {
