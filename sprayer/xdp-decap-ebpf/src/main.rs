@@ -18,6 +18,11 @@ use network_types::{
 };
 use common::{Interface, FlowKey, FlowNextHop, SrcDst, BthHdr, PrevBth, XskMap};
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ControlMsg{
+    msg_type: u32,
+}
 enum BufferReason {
     MiddleAfterLast,
     FirstMissingForLast,
@@ -28,7 +33,12 @@ enum BufferReason {
     LastAfterLast,
     FirstAfterFirst,
     FirstAfterMiddle,
+    Custom,
 }
+
+
+
+
 
 impl BufferReason{
     fn msg(self) -> &'static str {
@@ -42,9 +52,12 @@ impl BufferReason{
             BufferReason::FirstAfterFirst => "first after first",
             BufferReason::FirstAfterMiddle => "first after middle",
             BufferReason::FirstPsnSeqMismatch => "first psn seq mismatch",
+            BufferReason::Custom => "custom",
         }
     }
 }
+
+
 
 #[map(name = "ENCAPINTERFACE")]
 static mut ENCAPINTERFACE: HashMap<u32, Interface> =
@@ -62,7 +75,7 @@ static mut PREVBTH: HashMap<u32, PrevBth> =
 static mut BUFFERCOUNTER: HashMap<u8, u32> =
     HashMap::<u8, u32>::with_max_entries(1, 0);
 
-#[map(name = "XSKMAP")]
+#[map(name = "INGRESSXSKMAP")]
 static mut XSKMAP: XskMap<u32, u32> =
     XskMap::<u32, u32>::with_max_entries(64, 0);
 #[xdp]
@@ -85,7 +98,10 @@ pub fn xdp_decap(ctx: XdpContext) -> u32 {
 fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
     //unsafe { (*ctx.ctx).rx_queue_index };
     //info!(&ctx, "xdp_decap, encap int {}", encap_intf.ifidx);
+    info!(&ctx, "xdp_decap");
     let eth = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
+    let eth_type = u16::from_be(unsafe { (*eth).ether_type as u16});
+    info!(&ctx, "eth type 0: {:x}", eth_type);
     if unsafe{ (*eth).ether_type } != EtherType::Ipv4 {
         return Ok(xdp_action::XDP_PASS);
     }
@@ -93,91 +109,111 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
     if unsafe { (*ip).proto } != IpProto::Udp {
         return Ok(xdp_action::XDP_PASS);
     }
+    let src_address = unsafe { (*ip).src_addr };
+    let dst_address = unsafe { (*ip).dst_addr };
+    info!(&ctx, "src ip: {:i}, dst ip: {:i}", u32::from_be(src_address), u32::from_be(dst_address));
     let udp = ptr_at_mut::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(xdp_action::XDP_PASS)?;
-    let res = if unsafe { u16::from_be((*udp).dest) } == 3000 {
+    let udp_dest = unsafe { u16::from_be((*udp).dest) };
+    let res = if udp_dest == 3000 || udp_dest == 3001 {
+        info!(&ctx, "udp packet 0");
         unsafe { bpf_xdp_adjust_head(ctx.ctx, (EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as i32)};
         let inner_eth = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
         if unsafe{ (*inner_eth).ether_type } != EtherType::Ipv4 {
             return Ok(xdp_action::XDP_PASS);
         }
+        let buffer_reason = if udp_dest == 3000{
+            let bth_hdr = ptr_at_mut::<BthHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+            let op_code = unsafe { u8::from_be((*bth_hdr).opcode) };
+            let psn_seq_list = unsafe { (*bth_hdr).psn_seq };
+            let psn_seq = u32::from_be_bytes([psn_seq_list[0], psn_seq_list[1], psn_seq_list[2], 0]);
+            let dst_qp_list = unsafe { (*bth_hdr).dest_qpn };
+            let dst_qp = u32::from_be_bytes([dst_qp_list[0], dst_qp_list[1], dst_qp_list[2], 0]);
+            info!(&ctx, "udp dst 3000");
+            match unsafe { PREVBTH.get_ptr_mut(&dst_qp)} {
+                Some(prev_bth_ptr) => {
+                    //first
+                    if op_code == 0 {
+                        if unsafe { (*prev_bth_ptr).opcode == 0} {
+                            Some(BufferReason::FirstAfterFirst)
+                        } else if unsafe { (*prev_bth_ptr).opcode == 1} {
+                            Some(BufferReason::FirstAfterMiddle)
+                        } else if unsafe { (*prev_bth_ptr).opcode == 2} {
+                            if unsafe { (*prev_bth_ptr).next_psn_seq } == psn_seq {
+                                unsafe { (*prev_bth_ptr).next_psn_seq = psn_seq + 1 };
+                                unsafe { (*prev_bth_ptr).opcode = op_code };
+                                unsafe { (*prev_bth_ptr).first_psn_seq = psn_seq };
+                                None
+                            } else {
+                                Some(BufferReason::FirstPsnSeqMismatch)
+                            }
+                        } else {
+                            None
+                        }
+                    //middle
+                    } else if op_code == 1 {
+                        // middle after first or middle after middle
+                        if unsafe { (*prev_bth_ptr).opcode == 0} || unsafe { (*prev_bth_ptr).opcode == 1}{
+                            if psn_seq == unsafe { (*prev_bth_ptr).next_psn_seq } {
+                                unsafe { (*prev_bth_ptr).next_psn_seq = psn_seq + 1 };
+                                unsafe { (*prev_bth_ptr).opcode = op_code };
+                                None
+                            } else {
+                                Some(BufferReason::MiddlePsnSeqMismatch)
+                            }
+                        // middle after last
+                        } else if unsafe { (*prev_bth_ptr).opcode == 2} {
+                            Some(BufferReason::MiddleAfterLast)
+                        }  else {
+                            None
+                        }
+                    //last
+                    } else if op_code == 2 {
+                        // last after first or last after middle
+                        if unsafe { (*prev_bth_ptr).opcode == 0} || unsafe { (*prev_bth_ptr).opcode == 1}{
+                            if psn_seq == unsafe { (*prev_bth_ptr).next_psn_seq } {
+                                unsafe { (*prev_bth_ptr).next_psn_seq = psn_seq + 1 };
+                                unsafe { (*prev_bth_ptr).opcode = op_code };
+                                None
+                            } else {
+                                Some(BufferReason::LastPsnSeqMismatch)
+                            }
+                        // last after last
+                        } else if unsafe { (*prev_bth_ptr).opcode == 2} {
+                            Some(BufferReason::LastAfterLast)
+                        } else {
+                            None
+                        }
 
-
-        let bth_hdr = ptr_at_mut::<BthHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
-        let op_code = unsafe { u8::from_be((*bth_hdr).opcode) };
-        let psn_seq_list = unsafe { (*bth_hdr).psn_seq };
-        let psn_seq = u32::from_be_bytes([psn_seq_list[0], psn_seq_list[1], psn_seq_list[2], 0]);
-        let dst_qp_list = unsafe { (*bth_hdr).dest_qpn };
-        let dst_qp = u32::from_be_bytes([dst_qp_list[0], dst_qp_list[1], dst_qp_list[2], 0]);
-        
-        match unsafe { PREVBTH.get_ptr_mut(&dst_qp)} {
-            Some(prev_bth_ptr) => {
-                //first
-                if op_code == 0 {
-                    if unsafe { (*prev_bth_ptr).opcode == 0} {
-                        return Ok(buffer(&ctx, BufferReason::FirstAfterFirst));
-                    } else if unsafe { (*prev_bth_ptr).opcode == 1} {
-                        return Ok(buffer(&ctx, BufferReason::FirstAfterMiddle));
-                    } else if unsafe { (*prev_bth_ptr).opcode == 2} {
-                        if unsafe { (*prev_bth_ptr).next_psn_seq } == psn_seq {
-                            unsafe { (*prev_bth_ptr).next_psn_seq = psn_seq + 1 };
-                            unsafe { (*prev_bth_ptr).opcode = op_code };
-                            unsafe { (*prev_bth_ptr).first_psn_seq = psn_seq };
-                        } else {
-                            return Ok(buffer(&ctx, BufferReason::FirstPsnSeqMismatch));
-                        }
+                    } else {
+                        None
                     }
-                //middle
-                } else if op_code == 1 {
-                    // middle after first or middle after middle
-                    if unsafe { (*prev_bth_ptr).opcode == 0} || unsafe { (*prev_bth_ptr).opcode == 1}{
-                        if psn_seq == unsafe { (*prev_bth_ptr).next_psn_seq } {
-                            unsafe { (*prev_bth_ptr).next_psn_seq = psn_seq + 1 };
-                            unsafe { (*prev_bth_ptr).opcode = op_code };
+                },
+                None => {
+                    //first
+                    if op_code == 0 {
+                        let mut prev_bth = unsafe { zeroed::<PrevBth>()};
+                        let next_seq = psn_seq + 1;
+                        prev_bth.opcode = op_code;
+                        prev_bth.first_psn_seq = psn_seq;
+                        prev_bth.next_psn_seq = next_seq;
+                        if let Err(_e) = unsafe { PREVBTH.insert(&dst_qp, &prev_bth, 0) }{
+                            return Ok(xdp_action::XDP_ABORTED)
                         } else {
-                            return Ok(buffer(&ctx, BufferReason::MiddlePsnSeqMismatch));
+                            None
                         }
-                    // middle after last
-                    } else if unsafe { (*prev_bth_ptr).opcode == 2} {
-                        return Ok(buffer(&ctx, BufferReason::MiddleAfterLast));
-                    } 
-                //last
-                } else if op_code == 2 {
-                    // last after first or last after middle
-                    if unsafe { (*prev_bth_ptr).opcode == 0} || unsafe { (*prev_bth_ptr).opcode == 1}{
-                        if psn_seq == unsafe { (*prev_bth_ptr).next_psn_seq } {
-                            unsafe { (*prev_bth_ptr).next_psn_seq = psn_seq + 1 };
-                            unsafe { (*prev_bth_ptr).opcode = op_code };
-                        } else {
-                            return Ok(buffer(&ctx, BufferReason::LastPsnSeqMismatch));
-                        }
-                    // last after last
-                    } else if unsafe { (*prev_bth_ptr).opcode == 2} {
-                        return Ok(buffer(&ctx, BufferReason::LastAfterLast));
+                    } else if op_code == 1 {
+                        Some(BufferReason::FirstMissingForMiddle)
+                    } else if op_code == 2 {
+                        Some(BufferReason::FirstMissingForLast)
+                    } else {
+                        None
                     }
-                    
-                } else {
-                    
                 }
-            },
-            None => {
-                //first
-                if op_code == 0 {
-                    let mut prev_bth = unsafe { zeroed::<PrevBth>()};
-                    let next_seq = psn_seq + 1;
-                    prev_bth.opcode = op_code;
-                    prev_bth.first_psn_seq = psn_seq;
-                    prev_bth.next_psn_seq = next_seq;
-                    if let Err(_e) = unsafe { PREVBTH.insert(&dst_qp, &prev_bth, 0) }{
-                        return Ok(xdp_action::XDP_ABORTED);
-                    }
-                } else if op_code == 1 {
-                    return Ok(buffer(&ctx, BufferReason::FirstMissingForMiddle));
-                } else if op_code == 2 {
-                    return Ok(buffer(&ctx, BufferReason::FirstMissingForLast));
-                }
-                
             }
-        }
+        } else {
+            info!(&ctx, "udp dst 3001");
+            Some(BufferReason::Custom)
+        };
         let flow_next_hop = if let Some(flow_next_hop) = get_v4_next_hop_from_flow_table(&ctx){
             flow_next_hop
         } else if let Some(flow_next_hop) = get_next_hop(&ctx) {
@@ -187,21 +223,31 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
         };
         unsafe { (*inner_eth).src_addr = flow_next_hop.src_mac };
         unsafe { (*inner_eth).dst_addr = flow_next_hop.dst_mac };
-        unsafe { bpf_redirect(encap_intf.ifidx, 0) }
-
-    } else if unsafe { u16::from_be((*udp).dest) } == 3001 {
-        return Ok(buffer(&ctx, BufferReason::FirstAfterFirst))
+        info!(&ctx, "matching buffer reason");
+        match buffer_reason{
+            Some(buffer_reason) => {
+                buffer(&ctx, buffer_reason)
+            },
+            None => {
+                unsafe { bpf_redirect(encap_intf.ifidx, 0) as u32 } 
+            }
+        }
     }
     else {
         xdp_action::XDP_PASS.into()
     };
     //info!(&ctx, "redirect res: {}", res);
-    Ok(res as u32)
+    Ok(res)
 }
 
 #[inline(always)]
 fn buffer(ctx: &XdpContext, buffer_reason: BufferReason) -> u32 {
     info!(ctx, "{}", buffer_reason.msg());
+
+
+    //let ctrl_msg_hdr_ptr = ptr_at_mut::<ControlMsg>(&ctx, 0).ok_or(xdp_action::XDP_PASS).unwrap();
+    //unsafe { ctrl_msg_hdr_ptr.write(ctrl_msg)};
+
     match unsafe { BUFFERCOUNTER.get_ptr_mut(&0) } {
         Some(counter_ptr) => {
             unsafe { *counter_ptr += 1 };

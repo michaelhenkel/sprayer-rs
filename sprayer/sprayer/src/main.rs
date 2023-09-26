@@ -17,6 +17,7 @@ use std::os::raw::c_int;
 use std::io::{Error, ErrorKind};
 use nix::ifaddrs::{getifaddrs, InterfaceAddress};
 
+
 /*
 use xsk_rs::{RxQueue, TxQueue, FrameDesc};
 use xsk_rs::{
@@ -48,7 +49,8 @@ use libbpf_sys::{
 };
 use std::cmp::min;
 
-
+use buffer::buffer::Buffer;
+pub mod buffer;
 const BUF_NUM: usize = 65536;
 const BUF_LEN: usize = 4096;
 const BATCH_SIZE: usize = 64;
@@ -234,8 +236,6 @@ async fn main() -> Result<(), anyhow::Error> {
         } else {
             warn!("COUNTER map not found");
         }
-
-
         info!("loading decap on interface {}", decap_intf);
         if let Err(e) = BpfLogger::init(&mut xdp_decap_bpf) {
             // This can happen if you remove all log statements from your eBPF program.
@@ -243,10 +243,6 @@ async fn main() -> Result<(), anyhow::Error> {
         }
         let decap_program: &mut Xdp = xdp_decap_bpf.program_mut("xdp_decap").unwrap().try_into()?;
         decap_program.load()?;
-
-
-
-
         decap_program.attach(&decap_intf, XdpFlags::DRV_MODE)
             .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;  
 
@@ -263,202 +259,33 @@ async fn main() -> Result<(), anyhow::Error> {
         }
 
 
-        let options = MmapAreaOptions{ huge_tlb: false };
-
-        let r = MmapArea::new(65535, 2048, options);
-        let (area, mut bufs) = match r {
-            Ok((area, bufs)) => (area, bufs),
-            Err(err) => panic!("no mmap for you: {:?}", err),
-        };
-    
-        let r = Umem::new(
-            area.clone(),
-            XSK_RING_CONS__DEFAULT_NUM_DESCS,
-            XSK_RING_PROD__DEFAULT_NUM_DESCS,
-        );
-        let (umem1, umem1cq, mut umem1fq) = match r {
-            Ok(umem) => umem,
-            Err(err) => panic!("no umem for you: {:?}", err),
-        };
-
-        let mut options = SocketOptions::default();
-        options.zero_copy_mode = false;
-        options.copy_mode = true;
-    
-        let r = Socket::new(
-            umem1.clone(),
-            &decap_intf,
-            0,
-            XSK_RING_CONS__DEFAULT_NUM_DESCS,
-            XSK_RING_PROD__DEFAULT_NUM_DESCS,
-            options,
-            1
-        );
-        let (skt1, skt1rx, skt1tx) = match r {
-            Ok(skt) => skt,
-            Err(err) => panic!("no socket for you: {:?}", err),
-        };
 
 
-        
-        
-    
-        // Fill the Umem
-        let r = umem1fq.fill(
-            &mut bufs,
-            min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, 65535),
-        );
-        match r {
-            Ok(n) => {
-                if n != min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, 65535) {
-                    panic!(
-                        "Initial fill of umem incomplete. Wanted {} got {}.",
-                        65535, n
-                    );
-                }
-            }
-            Err(err) => panic!("error: {:?}", err),
-        }
-    
+
         info!("load xsk map");
-        let map_fd = if let Some(xsk_map) = xdp_decap_bpf.map_mut("XSKMAP") {
+        let ingress_map_fd = if let Some(xsk_map) = xdp_decap_bpf.map_mut("INGRESSXSKMAP") {
             let xsk_map = XskMap::<_, u32, u32>::try_from(xsk_map)?;
             xsk_map.fd().unwrap().as_fd().as_raw_fd()    
         } else {
-            panic!("XSKMAP map not found");
+            panic!("INGRESSXSKMAP map not found");
         };
 
-        //let mut xks_s = skt1.socket.as_ref();
-        //let x = xks_s as *const xsk_socket as *mut xsk_socket;
-        info!("getting sock ptr");
-        let xsk_sock = skt1.socket.as_ref() as *const xsk_socket as *mut xsk_socket;        
-        info!("got sock ptr");
-        //let fd = decap_program.fd().unwrap().as_fd().as_raw_fd();
-        //let fdx = unsafe { bpf_prog_get_fd_by_id(decap_program.program_info().unwrap().id() as i32) };
-        //aya::sys::bpf_prog_get_info_by_fd(fd, &mut info, &mut info_len);
-        //let obj = unsafe { zeroed::<bpf_object>()};
-        //let obj = &obj as *const bpf_object;
-        //let prog_name = CString::new("xdp_decap").unwrap();
-        //let prog_name = prog_name.as_ptr();
-        //let prog = unsafe { bpf_object__find_program_by_name(obj, prog_name) };
-        info!("found program");
-        unsafe { xsk_socket__update_xskmap(xsk_sock, map_fd) };
-        /* 
-        let s = CString::new("XSKMAP").unwrap();
-        let s = s.as_ptr();
-        let bpf_map = unsafe { bpf_object__find_map_by_name(obj, s) };
-        let fd = unsafe { bpf_map__fd(bpf_map) };
-        unsafe { xsk_socket__update_xskmap(x, fd) };
-        */
-
-        //let mut xdp_worker = get_socket(decap_intf.clone());
-        /*
-        let tx_id = skt1rx.fd as u32;
-        info!("load xsk map");
-        if let Some(xsk_map) = xdp_decap_bpf.map_mut("XSKMAP") {
-            let mut xsk_map: XskMap<_, u32, u32> = XskMap::try_from(xsk_map)?;
-            info!("insert socket {} into xsk map", tx_id);
-            xsk_map.insert(&0, &tx_id, 0)?;
+        let egress_map_fd = if let Some(xsk_map) = xdp_encap_bpf.map_mut("EGRESSXSKMAP") {
+            let xsk_map = XskMap::<_, u32, u32>::try_from(xsk_map)?;
+            xsk_map.fd().unwrap().as_fd().as_raw_fd()    
         } else {
-            warn!("XSKMAP map not found");
-        }
-        */
-
-        /* 
-        let xdp_socket = XdpSocket::new(CString::new(decap_intf).unwrap());
-        //let (tx, rx, desc, umem) = get_socket(CString::new(decap_intf).unwrap());
-        //let tx_id = tx.fd().as_raw_fd() as u32;
-        let tx_id = xdp_socket.get_tx_socket();
-
-
- 
-        let res = tokio::spawn(async move {
-            xdp_socket.receive().await;
-        });
-        
-
-        res.await?;
-        */
-
-        /*
-        
-        let res = tokio::spawn(async move {
-            xdp_worker.run().await;
-        });
-        res.await?;
-
-        */
-        let mut v: ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping> = ArrayDeque::new();
-        let custom = BufCustom {};
-        let mut state = State {
-            cq: umem1cq,
-            fq: umem1fq,
-            rx: skt1rx,
-            tx: skt1tx,
-            fq_deficit: 0,
+            panic!("EGRESSXSKMAP map not found");
         };
-        loop {
 
-            let r = state.cq.service(&mut bufs, 64);
-            match r {
-                Ok(n) => {
-                    //info!("serviced {} packets", n)
-                }
-                Err(err) => panic!("error: {:?}", err),
-            }
+        let mut buf = Buffer::new(decap_intf.clone(), encap_intf.clone(), ingress_map_fd, egress_map_fd);
 
-            let r = state.rx.try_recv(&mut v, 64, custom);
-            match r {
-                Ok(n) => {
-                    //info!("received {} packets", n);
-                    if n > 0 {
-                        info!("received {} packets", n);
-    
-                        state.fq_deficit += n;
-                    } else {
-                        if state.fq.needs_wakeup() {
-                            state.rx.wake();
-                        }
-                    }
-                }
-                Err(err) => {
-                    panic!("error: {:?}", err);
-                }
-            }
+        buf.run().await;
+        //let res = tokio::spawn(async move {
+        //    
+        //});
 
-            if state.fq_deficit > 0 {
-                let r = state.fq.fill(&mut bufs, state.fq_deficit);
-                match r {
-                    Ok(n) => {
-                        state.fq_deficit -= n;
-                    }
-                    Err(err) => panic!("error: {:?}", err),
-                }
-            }
+        //res.await?;
 
-
-        }
-        
-        
-    
-
-
-        /* 
-        let (mut tx_queue, mut rx_queue, mut dev_desc) = get_socket(CString::new(decap_intf.clone()).unwrap());
-        let tx_fd = tx_queue.fd().as_raw_fd() as u32;
-
-        if let Some(xsk_map) = xdp_decap_bpf.map_mut("XSKMAP") {
-            let mut xsk_map: HashMap<_, u32, u32> = HashMap::try_from(xsk_map)?;
-            xsk_map.insert(&0, &tx_fd, 0)?;
-        } else {
-            warn!("XSKMAP map not found");
-        }
-
-        let pkts_recvd = unsafe { rx_queue.poll_and_consume(&mut dev_desc, 100).unwrap() };
-        */
-
-
-        //encap_decap(encap_intf, decap_intf, links)?
     } else if opt.dummy.is_some() {
         let dummy_intf = opt.dummy.unwrap();
         if let Err(e) = BpfLogger::init(&mut xdp_dummy_bpf) {
@@ -480,160 +307,6 @@ async fn main() -> Result<(), anyhow::Error> {
 
     Ok(())
 }
-
-/*
-
-struct XdpSocket{
-    tx: TxQueue,
-    rx: RxQueue,
-    desc: Vec<FrameDesc>,
-    umem: Umem,
-}
-
-impl XdpSocket{
-    fn new(link_name: CString) -> Self{
-        let link = xsk_rs::config::Interface::new(link_name);
-        
-        let (dev1_umem, mut dev1_descs) = Umem::new(
-            UmemConfig::default(), 
-            32.try_into().unwrap(), 
-            false
-        )
-        .expect("failed to create UMEM");
-        let mut flags = LibbpfFlags::all();
-        let socket_config = SocketConfigBuilder::new().libbpf_flags(flags).build();
-        let (mut dev1_tx_q, dev1_rx_q, _dev1_fq_and_cq) = Socket::new(
-            socket_config,
-            &dev1_umem,
-            &link,
-            0,
-        )
-        .expect("failed to create dev1 socket");
-        Self{
-            tx: dev1_tx_q,
-            rx: dev1_rx_q,
-            desc: dev1_descs,
-            umem: dev1_umem,
-        }
-    }
-    fn get_tx_socket(&self) -> u32 {
-        self.tx.fd().as_raw_fd() as u32
-    }
-    async fn receive(mut self) {
-        loop {
-            // 4. Read on dev2.
-            let pkts_recvd = unsafe { self.rx.poll_and_consume(&mut self.desc, 100).unwrap() };
-            
-            // 5. Confirm that one of the packets we received matches what we expect.
-            for recv_desc in self.desc.iter().take(pkts_recvd) {
-                let data = unsafe { self.umem.data(recv_desc) };
-                info!("received packet: {:?}", data);
-
-            }
-        }
-    }
-}
-
-
-async fn receive(mut rx: RxQueue, mut desc: Vec<FrameDesc>, umem: Umem ) {
-
-
-    // 4. Read on dev2.
-    let pkts_recvd = unsafe { rx.poll_and_consume(&mut desc, 100).unwrap() };
-
-    // 5. Confirm that one of the packets we received matches what we expect.
-    for recv_desc in desc.iter().take(pkts_recvd) {
-        let data = unsafe { umem.data(recv_desc) };
-        info!("received packet: {:?}", data);
-        
-    }
-}
-
-*/
-
-
-fn get_socket(link_name: String) -> XDPWorker<'static>{
-    assert!(setrlimit(Resource::MEMLOCK, rlimit::INFINITY, rlimit::INFINITY).is_ok());
-    let options = MmapAreaOptions { huge_tlb: false };
-    let r = MmapArea::new(BUF_NUM, BUF_LEN, options);
-    let (area, mut bufs) = match r {
-        Ok((area, bufs)) => (area, bufs),
-        Err(err) => panic!("Unable to create mmap: {:?}", err),
-    };
-    let mut bp: BufPoolVec<BufMmap<BufCustom>, BufCustom> = BufPoolVec::new(bufs.len());
-    let len = bufs.len();
-    let r = bp.put(&mut bufs, len);
-    let r = Umem::new(
-        area.clone(),
-        XSK_RING_CONS__DEFAULT_NUM_DESCS,
-        XSK_RING_PROD__DEFAULT_NUM_DESCS,
-    );
-    let (umem1, umem1cq, mut umem1fq) = match r {
-        Ok(umem) => umem,
-        Err(err) => panic!("Unable to create umem: {:?}", err),
-    };
-    let mut sock_opts = SocketOptions::default();
-    sock_opts.zero_copy_mode = false;
-    sock_opts.copy_mode = true;
-    
-    /*
-    let rx = Socket::new_rx(
-        umem1.clone(),
-        &link_name,
-        0, XSK_RING_CONS__DEFAULT_NUM_DESCS, sock_opts, 1);
-
-    let (_, skt1rx) = match rx {
-        Ok(rx_skt) => rx_skt,
-        Err(err) => {
-            panic!("Unable to create rx socket for intf {} {:?}",link_name, err) 
-        }
-    };
-
-    let tx = Socket::new_tx(
-        umem1.clone(),
-        &link_name,
-        0, XSK_RING_PROD__DEFAULT_NUM_DESCS, sock_opts, 1);
-        
-    let (_,skt1tx) = match tx {
-        Ok(tx_skt) => tx_skt,
-        Err(err) => {
-            panic!("Unable to create tx socket for intf {} {:?}",link_name, err) 
-        }
-    };
-    */
-    
-    
-    let r = Socket::new(
-        umem1.clone(),
-        link_name.as_str(),
-        0,
-        XSK_RING_CONS__DEFAULT_NUM_DESCS,
-        XSK_RING_PROD__DEFAULT_NUM_DESCS,
-        sock_opts,
-        1
-    );
-
-    let (_skt1, skt1rx, skt1tx) = match r {
-        Ok(skt) => skt,
-        Err(err) => {
-            panic!("Unable to create socket for intf {} {:?}",link_name, err)
-            
-        }
-    };
-    
-    
-    
-    let xdp_worker = XDPWorker{
-        core: 0,
-        rx: skt1rx,
-        tx: skt1tx,
-        cq: umem1cq,
-        fq: umem1fq,
-    };
-    xdp_worker
-}
-
-
 
 fn get_interface_index(interface_name: &str) -> Result<u32, Error> {
     let interface_name_cstring = CString::new(interface_name)?;
@@ -718,7 +391,7 @@ fn ip_to_dec(ip: &str) -> u32{
 }
 
 
-
+/*
 impl XDPWorker<'_> {
     pub async fn run(&mut self) {
         let mut v: ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping> = ArrayDeque::new();
@@ -801,3 +474,4 @@ impl XDPWorker<'_> {
         }
     }
 }
+*/

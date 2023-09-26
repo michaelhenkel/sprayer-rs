@@ -41,6 +41,10 @@ static mut DECAPINTERFACE: HashMap<u32, Interface> =
 static mut FLOWTABLE: HashMap<FlowKey, FlowNextHop> =
     HashMap::<FlowKey, FlowNextHop>::with_max_entries(256, 0);
 
+#[map(name = "EGRESSXSKMAP")]
+static mut XSKMAP: XskMap<u32, u32> =
+    XskMap::<u32, u32>::with_max_entries(64, 0);
+
 #[xdp]
 pub fn xdp_encap(ctx: XdpContext) -> u32 {
     //info!(&ctx, "xdp_encap");
