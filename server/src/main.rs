@@ -6,9 +6,9 @@ use common::BthHdr;
 
 #[derive(Debug, Parser)]
 struct Opt {
-    #[clap(short, long, default_value = "3000")]
+    #[clap(short, long, default_value = "4791")]
     port: u16,
-    #[clap(short, long, default_value = "veth1")]
+    #[clap(short, long, default_value = "lima1")]
     iface: String,
 }
 
@@ -51,13 +51,18 @@ async fn run_udp_server(port: u16, ip: String) -> io::Result<()> {
 
     let mut buf = [0; 4];
     loop {
-        let (len, addr) = sock.recv_from(&mut buf).await?;
+        let (_len, _addr) = sock.recv_from(&mut buf).await?;
+        let bth_hdr: *const BthHdr = &buf as *const _ as *const BthHdr; 
+        let bth_hdr = unsafe { *bth_hdr };
+        println!("bth_hdr: {:?}", bth_hdr);
+        /*
         println!("port {}: {} bytes received from {}", port, len, addr);
         println!(
             "port {}: buffer contents: {}",
             port,
             String::from_utf8_lossy(&buf)
         );
+        */
     }
 }
 
