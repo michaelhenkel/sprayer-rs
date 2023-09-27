@@ -22,6 +22,7 @@ use libbpf_sys::{
     bpf_prog_get_fd_by_id,
     
 };
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::cmp::min;
 use std::slice;
@@ -33,6 +34,61 @@ use network_types::{
 use tokio::sync::mpsc;
 use futures;
 
+const BITMAP_SIZE: usize = 256 / 8 + 1;
+pub struct Qp<'a>{
+    pub last_seq_number: u32,
+    pub buf_map: BTreeMap<u32, BufMmap<'a, BufCustom>>,
+    pub bitmap: [u8; BITMAP_SIZE],
+}
+
+impl <'a>Qp<'a>{
+    pub fn new() -> Qp<'a>{
+        Qp{
+            last_seq_number: 0,
+            buf_map: BTreeMap::new(),
+            bitmap: [0; BITMAP_SIZE],
+        }
+    }
+    pub fn add_buf(&mut self, seq_number: u32, buf: BufMmap<'a, BufCustom>){
+        let index = seq_number / 8;
+        let offset = seq_number % 8;
+        self.bitmap[index as usize] |= 1 << offset;
+        self.buf_map.insert(seq_number, buf);
+    }
+    pub fn check_sequence(&self) -> Vec<u32>{
+        let mut sequences_to_send = Vec::new();
+        for i in self.bitmap.iter(){
+            for bit in 0..8{
+                if i & (1 << bit) == 1{
+                    sequences_to_send.push(bit);
+                } else {
+                    break;
+                }
+            }
+        }
+        sequences_to_send
+    }
+}
+
+pub struct QpBuffer<'a>{
+    pub qp_maps: BTreeMap<u32, Qp<'a>>,
+}
+
+impl <'a>QpBuffer<'a>{
+    pub fn handle(&mut self, qp_id: u32, seq_number: u32, buf: BufMmap<'a, BufCustom>){
+        match self.qp_maps.get_mut(&qp_id){
+            Some(qp) => {
+                qp.add_buf(seq_number, buf);
+                qp.check_sequence();
+            },
+            None => {
+                let mut qp = Qp::new();
+                qp.add_buf(seq_number, buf);
+                self.qp_maps.insert(qp_id, qp);
+            },
+        }
+    }
+}
 #[derive(Default, Copy, Clone)]
 pub struct BufCustom {}
 
@@ -53,6 +109,8 @@ impl Buffer {
         }
     }
     pub async fn run(&self) {
+        let mut qp_buf = QpBuffer{ qp_maps: BTreeMap::new() };
+        //let mut buf_map = BTreeMap::new();
         let options = MmapAreaOptions{ huge_tlb: false };
         let map_area = MmapArea::new(65535, 2048, options);
         let (area, mut bufs) = match map_area {
@@ -85,17 +143,16 @@ impl Buffer {
                         Ok(n) => {
                             if n > 0 {
                                 info!("received {} packets", n);
-                                //let res = self.process();
-                                //if res.len() > 0 {
-                                //    self.sync_tx.send(res).await;
-                                //}
-                                for elem in rx_state.v.iter(){
-
-                                }
                                 if let Some(v) = rx_state.v.pop_front(){
-                                    self.parse(&v);
-                                    tx_state.v.push_front(v);
+                                    let (qp_id, seq_num) = self.parse(&v);
+                                    qp_buf.handle(qp_id, seq_num, v);
+
+                                    /* 
+                                    buf_map.insert(res, v);
+                                    let new_v = buf_map.remove(&res).unwrap();
+                                    tx_state.v.push_front(new_v);
                                     tx.try_send(&mut tx_state.v, 64);
+                                    */
                                     rx_state.fq_deficit += n;
                                 }
 
@@ -115,7 +172,10 @@ impl Buffer {
         }
     }
 
-    pub fn parse<'a>(&self, buf: &BufMmap<'a, BufCustom>) {
+    pub fn parse<'a>(&self, buf: &BufMmap<'a, BufCustom>) -> (u32,u32){
+        
+        //buf_map.insert(1, buf);
+        
         let data = buf.get_data();
         let data_prt = data.as_ptr() as usize;
         let eth_hdr = (data_prt + 0) as *const EthHdr;
@@ -127,12 +187,22 @@ impl Buffer {
         let udp_data_ptr = (data_prt + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const u8;
         let s = unsafe { slice::from_raw_parts(udp_data_ptr, udp_data_len - UdpHdr::LEN) };
         info!("udp data: {:?}", s);
+        let data_container = parser(s);
+        for elem in &data_container{
+            let v = elem_to_u32(elem);
+            info!("value: {:?}", v);
+        }
+        let qp_id = &data_container[0];
+        let qp_id = elem_to_u32(qp_id);
+        let seq_number = &data_container[1];
+        let seq_number = elem_to_u32(seq_number);
+    
         let src_mac = mac_to_string( unsafe { &(*eth_hdr).src_addr });
         let dst_mac = mac_to_string( unsafe { &(*eth_hdr).dst_addr });
         let src_ip = decimal_to_ip(u32::from_be(unsafe { (*ipv4_hdr).src_addr }));
         let dst_ip = decimal_to_ip(u32::from_be(unsafe { (*ipv4_hdr).dst_addr }));
         info!("src_mac: {}, dst_mac: {}, src_ip: {}, dst_ip: {}", src_mac, dst_mac, src_ip, dst_ip);
-
+        (qp_id,seq_number)
     }
 }
 
@@ -241,3 +311,27 @@ fn mac_to_string(mac: &[u8; 6]) -> String {
     format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}", 
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
 }
+
+fn elem_to_u32(b: &[u8]) -> u32{
+    let s = String::from_utf8(b.to_vec()).unwrap();
+    let x: u32 = s.parse().unwrap();
+    x
+  }
+  
+  fn parser(data: &[u8]) -> Vec<Vec<u8>>{
+    let mut data_container = Vec::new();
+  
+    let mut temp = Vec::new();
+    for elem in data{
+      if *elem == 124{
+        data_container.push(temp);
+        temp = Vec::new();
+        continue;
+      }
+      if *elem >= 48 && *elem <= 57{
+        temp.push(*elem);
+      }
+    }
+    data_container.push(temp);
+    data_container
+  }

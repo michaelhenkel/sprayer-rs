@@ -5,7 +5,6 @@
         "./sprayer/xdp-decap-ebpf/Cargo.toml",
         "./sprayer/xdp-encap-ebpf/Cargo.toml",
         "./server/Cargo.toml",
-        "./sprayer/sprayer/Cargo.toml",
         "./sprayer/sprayer/Cargo.toml"
     ]
 }
