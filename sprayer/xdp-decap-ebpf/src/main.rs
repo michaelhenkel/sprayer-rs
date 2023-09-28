@@ -6,7 +6,7 @@ use core::mem::{self, zeroed, size_of};
 use aya_bpf::{
     bindings::{xdp_action, bpf_fib_lookup as fib_lookup},
     macros::{xdp, map},
-    helpers::{bpf_xdp_adjust_head, bpf_redirect, bpf_fib_lookup, bpf_redirect_map},
+    helpers::{bpf_xdp_adjust_head, bpf_xdp_adjust_tail, bpf_redirect, bpf_fib_lookup, bpf_redirect_map},
     programs::XdpContext,
     maps::HashMap, cty::c_void, 
 };
@@ -16,7 +16,7 @@ use network_types::{
     ip::{Ipv4Hdr, IpProto},
     udp::UdpHdr,
 };
-use common::{Interface, FlowKey, FlowNextHop, SrcDst, BthHdr, PrevBth, XskMap};
+use common::{Interface, FlowKey, FlowNextHop, SrcDst, BthHdr, Bth, XskMap};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -28,17 +28,16 @@ enum BufferReason {
     FirstMissingForLast,
     FirstMissingForMiddle,
     MiddlePsnSeqMismatch,
+    MiddleMissesPrevious,
     LastPsnSeqMismatch,
     FirstPsnSeqMismatch,
     LastAfterLast,
     FirstAfterFirst,
     FirstAfterMiddle,
+    FirstAfterLast,
+    LastMissesPrevious,
     Custom,
 }
-
-
-
-
 
 impl BufferReason{
     fn msg(self) -> &'static str {
@@ -51,13 +50,14 @@ impl BufferReason{
             BufferReason::LastAfterLast => "last after last",
             BufferReason::FirstAfterFirst => "first after first",
             BufferReason::FirstAfterMiddle => "first after middle",
+            BufferReason::FirstAfterLast => "first after last",
             BufferReason::FirstPsnSeqMismatch => "first psn seq mismatch",
+            BufferReason::MiddleMissesPrevious => "middle misses previous",
+            BufferReason::LastMissesPrevious => "last misses previous",
             BufferReason::Custom => "custom",
         }
     }
 }
-
-
 
 #[map(name = "ENCAPINTERFACE")]
 static mut ENCAPINTERFACE: HashMap<u32, Interface> =
@@ -67,9 +67,9 @@ static mut ENCAPINTERFACE: HashMap<u32, Interface> =
 static mut FLOWTABLE: HashMap<FlowKey, FlowNextHop> =
     HashMap::<FlowKey, FlowNextHop>::with_max_entries(256, 0);
 
-#[map(name = "PREVBTH")]
-static mut PREVBTH: HashMap<u32, PrevBth> =
-    HashMap::<u32, PrevBth>::with_max_entries(1024, 0);
+#[map(name = "BTHMAP")]
+static mut BTHMAP: HashMap<u32, Bth> =
+    HashMap::<u32, Bth>::with_max_entries(1024, 0);
 
 #[map(name = "BUFFERCOUNTER")]
 static mut BUFFERCOUNTER: HashMap<u8, u32> =
@@ -96,12 +96,8 @@ pub fn xdp_decap(ctx: XdpContext) -> u32 {
 }
 
 fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
-    //unsafe { (*ctx.ctx).rx_queue_index };
-    //info!(&ctx, "xdp_decap, encap int {}", encap_intf.ifidx);
-    info!(&ctx, "xdp_decap");
     let eth = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
     let eth_type = u16::from_be(unsafe { (*eth).ether_type as u16});
-    info!(&ctx, "eth type 0: {:x}", eth_type);
     if unsafe{ (*eth).ether_type } != EtherType::Ipv4 {
         return Ok(xdp_action::XDP_PASS);
     }
@@ -111,109 +107,107 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
     }
     let src_address = unsafe { (*ip).src_addr };
     let dst_address = unsafe { (*ip).dst_addr };
-    info!(&ctx, "src ip: {:i}, dst ip: {:i}", u32::from_be(src_address), u32::from_be(dst_address));
     let udp = ptr_at_mut::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(xdp_action::XDP_PASS)?;
     let udp_dest = unsafe { u16::from_be((*udp).dest) };
-    let res = if udp_dest == 3000 || udp_dest == 3001 {
-        info!(&ctx, "udp packet 0");
+    let res = if udp_dest == 3000 {
         unsafe { bpf_xdp_adjust_head(ctx.ctx, (EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as i32)};
         let inner_eth = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
         if unsafe{ (*inner_eth).ether_type } != EtherType::Ipv4 {
             return Ok(xdp_action::XDP_PASS);
         }
-        let buffer_reason = if udp_dest == 3000{
-            let bth_hdr = ptr_at_mut::<BthHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
-            let op_code = unsafe { u8::from_be((*bth_hdr).opcode) };
-            let psn_seq_list = unsafe { (*bth_hdr).psn_seq };
-            let psn_seq = u32::from_be_bytes([psn_seq_list[0], psn_seq_list[1], psn_seq_list[2], 0]);
-            let dst_qp_list = unsafe { (*bth_hdr).dest_qpn };
-            let dst_qp = u32::from_be_bytes([dst_qp_list[0], dst_qp_list[1], dst_qp_list[2], 0]);
-            info!(&ctx, "udp dst 3000");
-            match unsafe { PREVBTH.get_ptr_mut(&dst_qp)} {
-                Some(prev_bth_ptr) => {
-                    //first
-                    if op_code == 0 {
-                        if unsafe { (*prev_bth_ptr).opcode == 0} {
-                            Some(BufferReason::FirstAfterFirst)
-                        } else if unsafe { (*prev_bth_ptr).opcode == 1} {
-                            Some(BufferReason::FirstAfterMiddle)
-                        } else if unsafe { (*prev_bth_ptr).opcode == 2} {
-                            if unsafe { (*prev_bth_ptr).next_psn_seq } == psn_seq {
-                                unsafe { (*prev_bth_ptr).next_psn_seq = psn_seq + 1 };
-                                unsafe { (*prev_bth_ptr).opcode = op_code };
-                                unsafe { (*prev_bth_ptr).first_psn_seq = psn_seq };
-                                None
-                            } else {
-                                Some(BufferReason::FirstPsnSeqMismatch)
-                            }
-                        } else {
-                            None
-                        }
-                    //middle
-                    } else if op_code == 1 {
-                        // middle after first or middle after middle
-                        if unsafe { (*prev_bth_ptr).opcode == 0} || unsafe { (*prev_bth_ptr).opcode == 1}{
-                            if psn_seq == unsafe { (*prev_bth_ptr).next_psn_seq } {
-                                unsafe { (*prev_bth_ptr).next_psn_seq = psn_seq + 1 };
-                                unsafe { (*prev_bth_ptr).opcode = op_code };
-                                None
-                            } else {
-                                Some(BufferReason::MiddlePsnSeqMismatch)
-                            }
-                        // middle after last
-                        } else if unsafe { (*prev_bth_ptr).opcode == 2} {
-                            Some(BufferReason::MiddleAfterLast)
-                        }  else {
-                            None
-                        }
-                    //last
-                    } else if op_code == 2 {
-                        // last after first or last after middle
-                        if unsafe { (*prev_bth_ptr).opcode == 0} || unsafe { (*prev_bth_ptr).opcode == 1}{
-                            if psn_seq == unsafe { (*prev_bth_ptr).next_psn_seq } {
-                                unsafe { (*prev_bth_ptr).next_psn_seq = psn_seq + 1 };
-                                unsafe { (*prev_bth_ptr).opcode = op_code };
-                                None
-                            } else {
-                                Some(BufferReason::LastPsnSeqMismatch)
-                            }
-                        // last after last
-                        } else if unsafe { (*prev_bth_ptr).opcode == 2} {
-                            Some(BufferReason::LastAfterLast)
-                        } else {
-                            None
-                        }
+        let bth_hdr = ptr_at_mut::<BthHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+        let op_code = unsafe { u8::from_be((*bth_hdr).opcode) };
+        let psn_seq_list = unsafe { (*bth_hdr).psn_seq };
+        let psn_seq = u32::from_be_bytes([0, psn_seq_list[0], psn_seq_list[1], psn_seq_list[2]]);
+        info!(&ctx, "udp psn seq: {}", psn_seq);
+        let dst_qp_list = unsafe { (*bth_hdr).dest_qpn };
+        let dst_qp = u32::from_be_bytes([0, dst_qp_list[0], dst_qp_list[1], dst_qp_list[2]]);
 
+        let mut current_bth = unsafe { zeroed::<Bth>()};
+        current_bth.opcode = op_code;
+        current_bth.cur_psn_seq = psn_seq;
+        
+        let buffer_reason: Option<BufferReason> = 
+        if op_code == 0 {
+            info!(&ctx, "first");
+            current_bth.first_psn_seq = psn_seq;
+            match unsafe { BTHMAP.get_ptr_mut(&dst_qp)} {
+                Some(previous_bth_ptr) => {
+                    current_bth.out_of_order = 1;
+                    current_bth.prev_psn_seq = unsafe { (*previous_bth_ptr).next_psn_seq };
+                    if unsafe { (*previous_bth_ptr).opcode == 1 } {
+                        Some(BufferReason::FirstAfterMiddle)
+                    } else if unsafe { (*previous_bth_ptr).opcode == 2 } {
+                        Some(BufferReason::FirstAfterLast)
+                    } else if unsafe { (*previous_bth_ptr).opcode == 0 } {
+                        Some(BufferReason::FirstAfterFirst)
                     } else {
-                        None
+                        return Ok(xdp_action::XDP_ABORTED)
                     }
                 },
                 None => {
-                    //first
-                    if op_code == 0 {
-                        let mut prev_bth = unsafe { zeroed::<PrevBth>()};
+                    current_bth.prev_psn_seq = 0;
+                    current_bth.out_of_order = 0;
+                    current_bth.first_psn_seq = psn_seq;
+                    let next_seq = psn_seq + 1;
+                    current_bth.next_psn_seq = next_seq;
+                    None
+                }
+            }
+        } else if op_code == 1 {
+            info!(&ctx, "middle");
+            match unsafe { BTHMAP.get_ptr_mut(&dst_qp)} {
+                Some(previous_bth_ptr) => {
+                    if unsafe { (*previous_bth_ptr).next_psn_seq } == psn_seq {
+                        current_bth.out_of_order = 0;
+                        current_bth.prev_psn_seq = unsafe { (*previous_bth_ptr).cur_psn_seq };
                         let next_seq = psn_seq + 1;
-                        prev_bth.opcode = op_code;
-                        prev_bth.first_psn_seq = psn_seq;
-                        prev_bth.next_psn_seq = next_seq;
-                        if let Err(_e) = unsafe { PREVBTH.insert(&dst_qp, &prev_bth, 0) }{
-                            return Ok(xdp_action::XDP_ABORTED)
-                        } else {
-                            None
-                        }
-                    } else if op_code == 1 {
-                        Some(BufferReason::FirstMissingForMiddle)
-                    } else if op_code == 2 {
-                        Some(BufferReason::FirstMissingForLast)
-                    } else {
+                        current_bth.next_psn_seq = next_seq;
+                        current_bth.first_psn_seq = unsafe { (*previous_bth_ptr).first_psn_seq };
                         None
+                    } else {
+                        current_bth.out_of_order = 1;
+                        current_bth.prev_psn_seq = unsafe { (*previous_bth_ptr).cur_psn_seq };
+                        current_bth.first_psn_seq = unsafe { (*previous_bth_ptr).first_psn_seq };
+                        Some(BufferReason::MiddlePsnSeqMismatch)
                     }
+                },
+                None => {
+                    current_bth.prev_psn_seq = 0;
+                    current_bth.out_of_order = 1;
+                    Some(BufferReason::MiddleMissesPrevious)
+                }
+            }
+        } else if op_code == 2 {
+            info!(&ctx, "last");
+            match unsafe { BTHMAP.get_ptr_mut(&dst_qp)} {
+                Some(previous_bth_ptr) => {
+                    if unsafe { (*previous_bth_ptr).next_psn_seq } == psn_seq {
+                        current_bth.out_of_order = 0;
+                        current_bth.prev_psn_seq = unsafe { (*previous_bth_ptr).cur_psn_seq };
+                        current_bth.first_psn_seq = unsafe { (*previous_bth_ptr).first_psn_seq };
+                        None
+                    } else {
+                        current_bth.out_of_order = 1;
+                        current_bth.prev_psn_seq = unsafe { (*previous_bth_ptr).cur_psn_seq };
+                        current_bth.first_psn_seq = unsafe { (*previous_bth_ptr).first_psn_seq };
+                        Some(BufferReason::LastPsnSeqMismatch)
+                    }
+                },
+                None => {
+                    current_bth.prev_psn_seq = 0;
+                    current_bth.out_of_order = 1;
+                    Some(BufferReason::LastMissesPrevious)
                 }
             }
         } else {
-            info!(&ctx, "udp dst 3001");
-            Some(BufferReason::Custom)
+            info!(&ctx, "unknown");
+            return Ok(xdp_action::XDP_ABORTED)
         };
+
+        if let Err(_e) = unsafe { BTHMAP.insert(&dst_qp, &current_bth, 0) }{
+            return Ok(xdp_action::XDP_ABORTED)
+        }       
         let flow_next_hop = if let Some(flow_next_hop) = get_v4_next_hop_from_flow_table(&ctx){
             flow_next_hop
         } else if let Some(flow_next_hop) = get_next_hop(&ctx) {
@@ -223,9 +217,18 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
         };
         unsafe { (*inner_eth).src_addr = flow_next_hop.src_mac };
         unsafe { (*inner_eth).dst_addr = flow_next_hop.dst_mac };
-        info!(&ctx, "matching buffer reason");
         match buffer_reason{
             Some(buffer_reason) => {
+                unsafe { bpf_xdp_adjust_head(ctx.ctx, Bth::LEN as i32)};
+                let bth_hdr_ptr = ptr_at_mut::<Bth>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
+                let mut new_bth = unsafe { zeroed::<Bth>()};
+                new_bth.opcode = current_bth.opcode;
+                new_bth.first_psn_seq = current_bth.first_psn_seq;
+                new_bth.prev_psn_seq = current_bth.prev_psn_seq;
+                new_bth.cur_psn_seq = current_bth.cur_psn_seq;
+                new_bth.next_psn_seq = current_bth.next_psn_seq;
+                new_bth.out_of_order = current_bth.out_of_order;
+                unsafe { bth_hdr_ptr.write(new_bth)};
                 buffer(&ctx, buffer_reason)
             },
             None => {
@@ -236,35 +239,27 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
     else {
         xdp_action::XDP_PASS.into()
     };
-    //info!(&ctx, "redirect res: {}", res);
     Ok(res)
 }
 
 #[inline(always)]
 fn buffer(ctx: &XdpContext, buffer_reason: BufferReason) -> u32 {
-    info!(ctx, "{}", buffer_reason.msg());
-
-
-    //let ctrl_msg_hdr_ptr = ptr_at_mut::<ControlMsg>(&ctx, 0).ok_or(xdp_action::XDP_PASS).unwrap();
-    //unsafe { ctrl_msg_hdr_ptr.write(ctrl_msg)};
-
+    info!(ctx, "buffer reason: {}", buffer_reason.msg());
     match unsafe { BUFFERCOUNTER.get_ptr_mut(&0) } {
         Some(counter_ptr) => {
             unsafe { *counter_ptr += 1 };
-            info!(ctx, "buffer counter x: {}", unsafe { *counter_ptr })
+            //info!(ctx, "buffer counter x: {}", unsafe { *counter_ptr })
         },
         None => {
             let counter = 1;
             if let Err(_e) = unsafe { BUFFERCOUNTER.insert(&0, &counter, 0) }{
-                warn!(ctx, "buffer counter insert failed");
+                //warn!(ctx, "buffer counter insert failed");
             }
         }
     }
     let idx = unsafe { (*ctx.ctx).rx_queue_index };
     let map_ptr = unsafe { &mut XSKMAP as *mut _ as *mut c_void };
-    let redirect = unsafe { bpf_redirect_map(map_ptr, idx as u64, 0)};
-    info!(ctx, "redirect res: {} to idx", redirect);
-    return xdp_action::XDP_REDIRECT;
+    unsafe { bpf_redirect_map(map_ptr, idx as u64, 0) as u32}
 }
 
 #[inline(always)]

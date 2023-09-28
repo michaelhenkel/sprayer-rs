@@ -1,4 +1,6 @@
 {
+    "rust-analyzer.cargo.target": "aarch64-unknown-linux-gnu",
+    "rust-analyzer.checkOnSave.allTargets": false,
     "rust-analyzer.linkedProjects": [
         "./sprayer/sprayer/Cargo.toml",
         "./sprayer/xdp-dummy-ebpf/Cargo.toml",

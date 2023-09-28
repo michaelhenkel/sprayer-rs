@@ -168,7 +168,7 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
     let outer_udp_hdr_len = outer_ip_hdr_len - Ipv4Hdr::LEN as u16;
     let outer_udp_hdr = UdpHdr{
         source: hash_16bit(udp_src_port),
-        dest: u16::to_be(3001),
+        dest: u16::to_be(3000),
         len: u16::to_be(outer_udp_hdr_len),
         check: 0,
     };

@@ -7,7 +7,7 @@ use aya_log::BpfLogger;
 use clap::Parser;
 use log::{info, warn, debug};
 use tokio::signal;
-use common::Interface;
+use common::{Interface, Bth};
 
 use std::ffi::CString;
 use std::mem::zeroed;
@@ -119,10 +119,10 @@ async fn main() -> Result<(), anyhow::Error> {
         debug!("remove limit on locked memory failed, ret is: {}", ret);
     }
 
-    #[cfg(debug_assertions)]
-    let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
-        "/tmp/lima/bpfel-unknown-none/debug/xdp-encap"
-    ))?;
+    //#[cfg(debug_assertions)]
+    //let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
+    //    "/tmp/lima/bpfel-unknown-none/debug/xdp-encap"
+    //))?;
     #[cfg(not(debug_assertions))]
     info!("load encap release");
     let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
@@ -142,12 +142,12 @@ async fn main() -> Result<(), anyhow::Error> {
     */
     
 
-    #[cfg(debug_assertions)]
-    let mut xdp_decap_bpf = BpfLoader::new().allow_unsupported_maps().load(
-        include_bytes_aligned!(
-            "/tmp/lima/bpfel-unknown-none/debug/xdp-decap"
-        )
-    )?;
+    //#[cfg(debug_assertions)]
+    //let mut xdp_decap_bpf = BpfLoader::new().allow_unsupported_maps().load(
+    //    include_bytes_aligned!(
+    //        "/tmp/lima/bpfel-unknown-none/debug/xdp-decap"
+    //    )
+    //)?;
 
     #[cfg(not(debug_assertions))]
     info!("load decap release");
@@ -157,10 +157,10 @@ async fn main() -> Result<(), anyhow::Error> {
         )
     )?;
 
-    #[cfg(debug_assertions)]
-    let mut xdp_dummy_bpf = Bpf::load(include_bytes_aligned!(
-        "/tmp/lima/bpfel-unknown-none/debug/xdp-dummy"
-    ))?;
+    //#[cfg(debug_assertions)]
+    //let mut xdp_dummy_bpf = Bpf::load(include_bytes_aligned!(
+    //    "/tmp/lima/bpfel-unknown-none/debug/xdp-dummy"
+    //))?;
     #[cfg(not(debug_assertions))]
     info!("load release");
     let mut xdp_dummy_bpf = Bpf::load(include_bytes_aligned!(
@@ -258,12 +258,17 @@ async fn main() -> Result<(), anyhow::Error> {
             warn!("ENCAPINTERFACE map not found");
         }
 
-
-
-
+        /*
+        let bth_map = if let Some(bth_map) = xdp_decap_bpf.map_mut("BTHMAP"){
+            let  bth_map: HashMap<_, u32, Bth> = HashMap::try_from(bth_map)?;
+            bth_map
+        } else {
+            panic!("BTHMAP map not found");
+        };
+        */
 
         info!("load xsk map");
-        let ingress_map_fd = if let Some(xsk_map) = xdp_decap_bpf.map_mut("INGRESSXSKMAP") {
+        let ingress_map_fd = if let Some(xsk_map) = xdp_decap_bpf.map("INGRESSXSKMAP") {
             let xsk_map = XskMap::<_, u32, u32>::try_from(xsk_map)?;
             xsk_map.fd().unwrap().as_fd().as_raw_fd()    
         } else {
@@ -277,14 +282,10 @@ async fn main() -> Result<(), anyhow::Error> {
             panic!("EGRESSXSKMAP map not found");
         };
 
-        let mut buf = Buffer::new(decap_intf.clone(), encap_intf.clone(), ingress_map_fd, egress_map_fd);
+        let mut buf = Buffer::new(decap_intf.clone(), encap_intf.clone(), ingress_map_fd, egress_map_fd, xdp_decap_bpf);
 
         buf.run().await;
-        //let res = tokio::spawn(async move {
-        //    
-        //});
 
-        //res.await?;
 
     } else if opt.dummy.is_some() {
         let dummy_intf = opt.dummy.unwrap();

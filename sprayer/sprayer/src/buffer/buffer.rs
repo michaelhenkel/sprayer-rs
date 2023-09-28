@@ -1,4 +1,7 @@
 use afxdp::buf_vec::BufVec;
+use aya::Bpf;
+use aya::maps::{MapData, HashMap};
+use common::{BthHdr, Bth};
 use log::{info, warn, debug};
 use network_types::ip;
 use rlimit::{setrlimit, Resource};
@@ -97,18 +100,30 @@ pub struct Buffer{
     egress_intf: String,
     ingress_map_fd: i32,
     egress_map_fd: i32,
+    xdp_decap_bpf: Bpf
+    //bth_map: HashMap<&'a mut MapData, u32, Bth>
 }
 
 impl Buffer {
-    pub fn new(ingress_intf: String, egress_intf: String, ingress_map_fd: i32, egress_map_fd: i32) -> Buffer {
+    pub fn new(ingress_intf: String, egress_intf: String, ingress_map_fd: i32, egress_map_fd: i32, xdp_decap_bpf: Bpf) -> Buffer {
         Buffer{
             ingress_intf,
             egress_intf,
             ingress_map_fd,
             egress_map_fd,
+            xdp_decap_bpf,
+            //bth_map,
         }
     }
-    pub async fn run(&self) {
+    pub async fn run(&mut self) -> anyhow::Result<()>{
+
+        let bth_map = if let Some(bth_map) = self.xdp_decap_bpf.map_mut("BTHMAP"){
+            let  bth_map: HashMap<_, u32, Bth> = HashMap::try_from(bth_map).unwrap();
+            bth_map
+        } else {
+            panic!("BTHMAP map not found");
+        };
+
         let mut qp_buf = QpBuffer{ qp_maps: BTreeMap::new() };
         //let mut buf_map = BTreeMap::new();
         let options = MmapAreaOptions{ huge_tlb: false };
@@ -143,17 +158,24 @@ impl Buffer {
                         Ok(n) => {
                             if n > 0 {
                                 info!("received {} packets", n);
-                                if let Some(v) = rx_state.v.pop_front(){
-                                    let (qp_id, seq_num) = self.parse(&v);
-                                    qp_buf.handle(qp_id, seq_num, v);
+                                for _ in 0..n {
+                                    if let Some(v) = rx_state.v.pop_front(){
+                                        let (qp_id, seq_num) = parse(&v);
+                                        //let bth = match bth_map.get(&qp_id, 0){
+                                        //    Ok(bth) => bth,
+                                        //    Err(err) => panic!("error: {:?}", err),
+                                        //};
+                                        //info!("bth: {:?}", bth);
+                                        qp_buf.handle(qp_id, seq_num, v);
 
-                                    /* 
-                                    buf_map.insert(res, v);
-                                    let new_v = buf_map.remove(&res).unwrap();
-                                    tx_state.v.push_front(new_v);
-                                    tx.try_send(&mut tx_state.v, 64);
-                                    */
-                                    rx_state.fq_deficit += n;
+                                        /* 
+                                        buf_map.insert(res, v);
+                                        let new_v = buf_map.remove(&res).unwrap();
+                                        tx_state.v.push_front(new_v);
+                                        tx.try_send(&mut tx_state.v, 64);
+                                        */
+                                        rx_state.fq_deficit += n;
+                                    }
                                 }
 
                             } else {
@@ -170,40 +192,24 @@ impl Buffer {
                 }
             }
         }
+        Ok(())
     }
 
-    pub fn parse<'a>(&self, buf: &BufMmap<'a, BufCustom>) -> (u32,u32){
-        
-        //buf_map.insert(1, buf);
-        
-        let data = buf.get_data();
-        let data_prt = data.as_ptr() as usize;
-        let eth_hdr = (data_prt + 0) as *const EthHdr;
-        let ipv4_hdr = (data_prt + EthHdr::LEN) as *const Ipv4Hdr;
-        let udp_hdr = (data_prt + EthHdr::LEN + Ipv4Hdr::LEN) as *const UdpHdr;
-        let udp_data_len = u16::from_be(unsafe { (*udp_hdr).len }) as usize;
-        let udp_src_port = u16::from_be(unsafe { (*udp_hdr).source });
-        info!("udp data len: {}", udp_data_len);
-        let udp_data_ptr = (data_prt + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const u8;
-        let s = unsafe { slice::from_raw_parts(udp_data_ptr, udp_data_len - UdpHdr::LEN) };
-        info!("udp data: {:?}", s);
-        let data_container = parser(s);
-        for elem in &data_container{
-            let v = elem_to_u32(elem);
-            info!("value: {:?}", v);
-        }
-        let qp_id = &data_container[0];
-        let qp_id = elem_to_u32(qp_id);
-        let seq_number = &data_container[1];
-        let seq_number = elem_to_u32(seq_number);
-    
-        let src_mac = mac_to_string( unsafe { &(*eth_hdr).src_addr });
-        let dst_mac = mac_to_string( unsafe { &(*eth_hdr).dst_addr });
-        let src_ip = decimal_to_ip(u32::from_be(unsafe { (*ipv4_hdr).src_addr }));
-        let dst_ip = decimal_to_ip(u32::from_be(unsafe { (*ipv4_hdr).dst_addr }));
-        info!("src_mac: {}, dst_mac: {}, src_ip: {}, dst_ip: {}", src_mac, dst_mac, src_ip, dst_ip);
-        (qp_id,seq_number)
-    }
+
+}
+
+pub fn parse<'a>(buf: &BufMmap<'a, BufCustom>) -> (u32,u32){        
+    let data = buf.get_data();
+    let data_prt = data.as_ptr() as usize;
+    let bth_hdr = (data_prt + 0) as *const Bth;
+    let bth = unsafe { *bth_hdr };
+    info!("bth: {:?}", bth);
+    let bth_hdr = (data_prt + Bth::LEN + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
+    let qp_id = unsafe { (*bth_hdr).dest_qpn };
+    let qp_id = u32::from_be_bytes([0, qp_id[0], qp_id[1], qp_id[2]]);
+    let seq_number = unsafe { (*bth_hdr).psn_seq };
+    let seq_number = u32::from_be_bytes([0, seq_number[0], seq_number[1], seq_number[2]]);
+    (qp_id,seq_number)
 }
 
 pub struct State<'a>{
@@ -231,7 +237,6 @@ impl <'a>State<'a>{
             Ok(umem) => umem,
             Err(err) => panic!("no umem for you: {:?}", err),
         };
-        let mut options = SocketOptions::default();
         let mut options = SocketOptions::default();
         options.zero_copy_mode = false;
         options.copy_mode = true;

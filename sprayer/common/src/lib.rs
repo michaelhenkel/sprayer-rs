@@ -150,12 +150,21 @@ impl BthHdr {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
-pub struct PrevBth {
+#[derive(Clone, Copy, Debug)]
+pub struct Bth {
     pub opcode: u8,
     pub first_psn_seq: u32,
+    pub prev_psn_seq: u32,
+    pub cur_psn_seq: u32,
     pub next_psn_seq: u32,
+    pub out_of_order: u8,
 }
+impl Bth {
+    pub const LEN: usize = mem::size_of::<Bth>();
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for Bth {}
 
 const fn build_def<K, V>(ty: u32, max_entries: u32, flags: u32, pin: PinningType) -> bpf_map_def {
     bpf_map_def {
