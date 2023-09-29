@@ -76,6 +76,7 @@ pub fn xdp_encap(ctx: XdpContext) -> u32 {
 
 fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u32, u32> {
     //info!(&ctx, "encap packet");
+    
     let eth_hdr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
     match unsafe { (*eth_hdr).ether_type } {
         EtherType::Ipv4 => {},

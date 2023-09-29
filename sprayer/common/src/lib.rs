@@ -152,12 +152,13 @@ impl BthHdr {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct Bth {
-    pub opcode: u8,
     pub first_psn_seq: u32,
     pub prev_psn_seq: u32,
     pub cur_psn_seq: u32,
     pub next_psn_seq: u32,
+    pub opcode: u8,
     pub out_of_order: u8,
+    pub padding: [u8;2],
 }
 impl Bth {
     pub const LEN: usize = mem::size_of::<Bth>();

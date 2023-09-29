@@ -219,7 +219,7 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
         unsafe { (*inner_eth).dst_addr = flow_next_hop.dst_mac };
         match buffer_reason{
             Some(buffer_reason) => {
-                unsafe { bpf_xdp_adjust_head(ctx.ctx, Bth::LEN as i32)};
+                unsafe { bpf_xdp_adjust_head(ctx.ctx, -(Bth::LEN as i32))};
                 let bth_hdr_ptr = ptr_at_mut::<Bth>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
                 let mut new_bth = unsafe { zeroed::<Bth>()};
                 new_bth.opcode = current_bth.opcode;
