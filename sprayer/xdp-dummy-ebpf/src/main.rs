@@ -36,7 +36,7 @@ pub fn xdp_dummy(ctx: XdpContext) -> u32 {
 
 
 fn try_xdp_dummy(ctx: XdpContext) -> Result<u32, u32> {
-    //info!(&ctx, "xdp_dummy");
+    ////info!(&ctx, "xdp_dummy");
     /*
     let eth_hdr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
     match unsafe { (*eth_hdr).ether_type } {
@@ -65,7 +65,7 @@ fn try_xdp_dummy(ctx: XdpContext) -> Result<u32, u32> {
     unsafe { (*eth_hdr).src_addr = flow_next_hop.src_mac };
 
     let res = unsafe { bpf_redirect(flow_next_hop.ifidx, 0) };
-    //info!(&ctx, "redirect res: {} to ifidx {}", res, flow_next_hop.ifidx);
+    ////info!(&ctx, "redirect res: {} to ifidx {}", res, flow_next_hop.ifidx);
     Ok(res as u32)
     */
     Ok(xdp_action::XDP_PASS)
@@ -86,7 +86,7 @@ fn get_v4_next_hop_from_flow_table(ctx: &XdpContext) -> Option<FlowNextHop>{
             return Some(fnh.clone())
         }
         None => {
-            info!(ctx, "flow_next_hop not found");
+            //info!(ctx, "flow_next_hop not found");
             return None;
         }
     }
@@ -111,7 +111,7 @@ fn get_next_hop(ctx: &XdpContext) -> Option<FlowNextHop>{
         bpf_fib_lookup(ctx_ptr, params_ptr, 64, 0)
     };
     if ret != 0 {
-        info!(ctx,"fib lookup failed for dst ip {:i}, ifidx {}, ret {}",dst_ip, if_idx, ret);
+        //info!(ctx,"fib lookup failed for dst ip {:i}, ifidx {}, ret {}",dst_ip, if_idx, ret);
         return None;
     }
     let flow_next_hop = FlowNextHop{

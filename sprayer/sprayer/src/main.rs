@@ -126,7 +126,7 @@ async fn main() -> Result<(), anyhow::Error> {
     #[cfg(not(debug_assertions))]
     info!("load encap release");
     let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
-        "/tmp/lima/bpfel-unknown-none/release/xdp-encap"
+        "../../target/bpfel-unknown-none/release/xdp-encap"
     ))?;
 
     /*
@@ -153,7 +153,7 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("load decap release");
     let mut xdp_decap_bpf = BpfLoader::new().allow_unsupported_maps().load(
         include_bytes_aligned!(
-            "/tmp/lima/bpfel-unknown-none/release/xdp-decap"
+            "../../target/bpfel-unknown-none/release/xdp-decap"
         )
     )?;
 
@@ -164,7 +164,7 @@ async fn main() -> Result<(), anyhow::Error> {
     #[cfg(not(debug_assertions))]
     info!("load release");
     let mut xdp_dummy_bpf = Bpf::load(include_bytes_aligned!(
-        "/tmp/lima/bpfel-unknown-none/release/xdp-dummy"
+        "../../target/bpfel-unknown-none/release/xdp-dummy"
     ))?;
 
     let res = if opt.decap.is_some() && opt.encap.is_some() {
@@ -284,7 +284,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
         let mut buf = Buffer::new(decap_intf.clone(), encap_intf.clone(), ingress_map_fd, egress_map_fd, xdp_decap_bpf);
 
-        buf.run().await;
+        match buf.run().await{
+            Ok(_) => {},
+            Err(e) => {
+                panic!("error: {:?}", e);
+            }
+        }
 
 
     } else if opt.dummy.is_some() {

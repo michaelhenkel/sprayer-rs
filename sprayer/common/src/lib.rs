@@ -156,12 +156,24 @@ pub struct Bth {
     pub prev_psn_seq: u32,
     pub cur_psn_seq: u32,
     pub next_psn_seq: u32,
+    pub last_inorder_psn_seq: u32,
     pub opcode: u8,
     pub out_of_order: u8,
     pub padding: [u8;2],
 }
 impl Bth {
     pub const LEN: usize = mem::size_of::<Bth>();
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SprayerHdr {
+    pub src_port: u16,
+    pub padding: u8,
+    pub qp_id: [u8;3],
+}
+impl SprayerHdr {
+    pub const LEN: usize = mem::size_of::<SprayerHdr>();
 }
 
 #[cfg(feature = "user")]
