@@ -15,6 +15,7 @@ use libbpf_sys::{
     xsk_socket,
 };
 use std::collections::HashMap as ColHashMap;
+use std::f32::consts::E;
 use std::sync::Arc;
 use std::cmp::min;
 use network_types::{
@@ -22,6 +23,7 @@ use network_types::{
     ip::Ipv4Hdr,
     udp::UdpHdr,
 };
+use common::{SprayerHdr, QpFirst};
 #[derive(Default, Copy, Clone)]
 pub struct BufCustom {}
 
@@ -57,7 +59,7 @@ impl Buffer {
         };
         let mut rx_state = State::new(area.clone(), &mut bufs, StateType::Rx, self.ingress_intf.clone(), self.ingress_map_fd);
         let mut tx_state = State::new(area.clone(), &mut bufs, StateType::Tx, self.egress_intf.clone(), self.egress_map_fd);
-        let mut queue_ring: ColHashMap<(u32,u32),BufMmap<BufCustom>> = ColHashMap::new();
+        let mut queue_ring: ColHashMap<(QpFirst,u32),BufMmap<BufCustom>> = ColHashMap::new();
         
         let custom = BufCustom {};
         loop {
@@ -83,52 +85,78 @@ impl Buffer {
                         Ok(n) => {
                             if n > 0 {
                                 for _ in 0..n {
-                                    if let Some(v) = rx_state.v.pop_front(){
+                                    if let Some(mut v) = rx_state.v.pop_front(){
                                         let data: &[u8] = v.get_data();
-                                        let data_prt = data.as_ptr() as usize;
-                                        let bth_hdr = (data_prt + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
-                                        let psn_seq_num = unsafe { (*bth_hdr).psn_seq };
-                                        let psn_seq_num = u32::from_be_bytes([0, psn_seq_num[0], psn_seq_num[1], psn_seq_num[2]]);
-                                        let qp_id = unsafe { (*bth_hdr).dest_qpn };
-                                        let qp_id = u32::from_be_bytes([0, qp_id[0], qp_id[1], qp_id[2]]);
+                                        let data_ptr = data.as_ptr() as usize;
+                                        let sprayer_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const SprayerHdr;
+                                        let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + SprayerHdr::LEN) as *const BthHdr;
+                                        
                                         let op_code = unsafe { u8::from_be((*bth_hdr).opcode) };
+                                        let dst_qpn = {
+                                            let dst_qp = unsafe { (*bth_hdr).dest_qpn };
+                                            u32::from_be_bytes([0, dst_qp[0], dst_qp[1], dst_qp[2]])
+                                        };
+                                        let first = {
+                                            let first = unsafe { (*sprayer_hdr).first };
+                                            u32::from_be_bytes([0, first[0], first[1], first[2]])
+                                        };
+                                        let seq_num = {
+                                            let seq_num = unsafe { (*bth_hdr).psn_seq };
+                                            u32::from_be_bytes([0, seq_num[0], seq_num[1], seq_num[2]])
+                                        };
+                                        let qp_first = QpFirst { dst_qpn, first };
+
+                                        info!("qp_id: {}, seq: {}, op_code:{}, first: {}", dst_qpn,seq_num,op_code,first);
+                                        
                                         if let Some(qp_seq_map) = self.xdp_decap_bpf.map_mut("QPSEQMAP"){
-                                            let mut qp_seq_map: HashMap<_, u32, u32> = HashMap::try_from(qp_seq_map)?;
-                                            if let Ok(mut next_seq_num) = qp_seq_map.get(&qp_id, 0){
-                                                if next_seq_num == psn_seq_num {
+                                            let mut qp_seq_map: HashMap<_, QpFirst, u32> = HashMap::try_from(qp_seq_map)?;
+                                            if let Ok(mut next_seq_num) = qp_seq_map.get(&qp_first, 0){
+                                                if next_seq_num == seq_num {
                                                     next_seq_num += 1;
+                                                    remove_sprayer_hdr(&mut v);
+
+                                                    let data = v.get_data();
+                                                    let data_ptr = data.as_ptr();
+                                                    let eth_hdr = unsafe { &*(data_ptr as *const EthHdr) };
+                                                    let dst_mac = mac_to_int(eth_hdr.dst_addr);
+                                                    let src_mac = mac_to_int(eth_hdr.src_addr);
+                                                    info!("src_mac: {}, dst_mac 2: {}",int_to_mac(src_mac as i64), int_to_mac(dst_mac as i64));
+                                                    info!("pushing 1 {}", seq_num);
+                
+
                                                     tx_state.v.push_back(v);
                                                     if op_code == 2 {
-                                                        match qp_seq_map.remove(&qp_id){
+                                                        match qp_seq_map.remove(&qp_first){
                                                             Ok(_) => {},
                                                             Err(err) => {
-                                                                warn!("1 qp_id: {}, seq: {}, op_code:{}, error: {:?}", qp_id,psn_seq_num,op_code,err);
+                                                                warn!("1 qp_id: {}, seq: {}, op_code:{}, error: {:?}", dst_qpn,seq_num,op_code,err);
                                                                 break;
                                                             }
                                                         };
                                                     } else {
-                                                        qp_seq_map.insert(&qp_id, next_seq_num, 0)?;
+                                                        qp_seq_map.insert(&qp_first, next_seq_num, 0)?;
                                                     }
                                                 } else {
-                                                    queue_ring.insert((qp_id, psn_seq_num), v);
+                                                    queue_ring.insert((qp_first, seq_num), v);
                                                 }
-                                                while let Some(v) = queue_ring.remove(&(qp_id, next_seq_num)){
+                                                while let Some(mut v) = queue_ring.remove(&(qp_first, next_seq_num)){
                                                     next_seq_num += 1;
+                                                    remove_sprayer_hdr(&mut v);
                                                     tx_state.v.push_back(v);
                                                     if op_code == 2 {
-                                                        match qp_seq_map.remove(&qp_id){
+                                                        match qp_seq_map.remove(&qp_first){
                                                             Ok(_) => {},
                                                             Err(err) => {
-                                                                warn!("2 qp_id: {}, seq: {}, op_code:{}, error: {:?}", qp_id,psn_seq_num,op_code,err);
+                                                                warn!("2 qp_id: {}, seq: {}, op_code:{}, error: {:?}", dst_qpn,seq_num,op_code,err);
                                                                 break;
                                                             }
                                                         };
                                                     } else {
-                                                        qp_seq_map.insert(&qp_id, next_seq_num, 0)?;
+                                                        qp_seq_map.insert(&qp_first, next_seq_num, 0)?;
                                                     }
                                                 }
                                             } else {
-                                                queue_ring.insert((qp_id, psn_seq_num), v);
+                                                queue_ring.insert((qp_first, seq_num), v);
                                             }
                                         }                                        
                                     }
@@ -168,6 +196,52 @@ impl Buffer {
     pub fn send<'a>(&mut self, buf: BufMmap<'a, BufCustom>, mut tx_state: State<'a>){
         tx_state.v.push_back(buf);
     }
+}
+
+fn remove_sprayer_hdr<'a>(v: &mut BufMmap<'a, BufCustom>) {
+    let data: &mut [u8] = v.get_data_mut();
+    let data_ptr = data.as_mut_ptr();
+    let eth_hdr_ptr = data_ptr as *mut EthHdr;
+    let eth_hdr = unsafe { eth_hdr_ptr.read() };
+    let ipv4_hdr_ptr = (data_ptr as usize + EthHdr::LEN) as *mut Ipv4Hdr;
+    let ipv4_hdr = unsafe { ipv4_hdr_ptr.read() };
+    let udp_hdr_ptr = (data_ptr as usize + EthHdr::LEN + Ipv4Hdr::LEN) as *mut UdpHdr;
+    let udp_hdr = unsafe { udp_hdr_ptr.read() };
+    //let sprayer_hdr_ptr = (data_ptr as usize + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *mut SprayerHdr;
+    //let sprayer_hdr = unsafe { sprayer_hdr_ptr.read() };
+    let bth_hdr_ptr = (data_ptr as usize + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + SprayerHdr::LEN) as *mut BthHdr;
+    let bth_hdr = unsafe { bth_hdr_ptr.read() };
+    data.rotate_left(SprayerHdr::LEN);
+
+    let eth_hdr_ptr = data_ptr as *mut EthHdr;
+    unsafe { eth_hdr_ptr.write(eth_hdr) };
+    let ipv4_hdr_ptr = (data_ptr as usize + EthHdr::LEN) as *mut Ipv4Hdr;
+    unsafe { ipv4_hdr_ptr.write(ipv4_hdr) };
+    let udp_hdr_ptr = (data_ptr as usize + EthHdr::LEN + Ipv4Hdr::LEN) as *mut UdpHdr;
+    unsafe { udp_hdr_ptr.write(udp_hdr) };
+    let bth_hdr_ptr = (data_ptr as usize + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *mut BthHdr;
+    unsafe { bth_hdr_ptr.write(bth_hdr) };
+    v.set_len(v.get_len()-SprayerHdr::LEN as u16);
+}
+
+#[inline(always)]
+fn int_to_mac(mut value: i64) -> String {
+    let mut bytes = [0u8; 6];
+    for i in (0..6).rev() {
+        bytes[i] = (value & 0xff) as u8;
+        value >>= 8;
+    }
+    format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5])
+}
+
+#[inline(always)]
+fn mac_to_int(mac: [u8;6]) -> u64 {
+    let mut mac_dec: u64 = 0;
+    for i in 0..6 {
+        mac_dec = mac_dec << 8;
+        mac_dec = mac_dec | mac[i] as u64;
+    }
+    mac_dec
 }
 
 pub struct State<'a>{

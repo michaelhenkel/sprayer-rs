@@ -1,5 +1,5 @@
 #![no_std]
-use core::{cell::UnsafeCell, marker::PhantomData, mem, ptr::NonNull};
+use core::{cell::UnsafeCell, marker::PhantomData, mem, ptr::NonNull, hash::{Hash, Hasher}};
 use aya_bpf::
     {
         bindings::{bpf_map_def, bpf_map_type::BPF_MAP_TYPE_XSKMAP},
@@ -9,6 +9,11 @@ use aya_bpf::
             bpf_map_update_elem,
             bpf_map_delete_elem,
         }
+};
+use network_types::{
+    eth::{EthHdr, EtherType},
+    ip::{Ipv4Hdr, IpProto, self},
+    udp::UdpHdr,
 };
 pub(crate) enum PinningType {
     None = 0,
@@ -151,6 +156,17 @@ impl BthHdr {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct EthIpUdp{
+    pub eth: EthHdr,
+    pub ip: Ipv4Hdr,
+    pub udp: UdpHdr,
+}
+impl EthIpUdp {
+    pub const LEN: usize = mem::size_of::<EthIpUdp>();
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct Bth {
     pub first_psn_seq: u32,
     pub prev_psn_seq: u32,
@@ -167,10 +183,37 @@ impl Bth {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct QpFirst{
+    pub dst_qpn: u32,
+    pub first: u32,
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for QpFirst {}
+
+#[cfg(feature = "user")]
+impl Hash for QpFirst {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.dst_qpn.hash(state);
+    }
+}
+
+#[cfg(feature = "user")]
+impl PartialEq for QpFirst {
+    fn eq(&self, other: &Self) -> bool {
+        self.dst_qpn == other.dst_qpn
+    }
+}
+
+#[cfg(feature = "user")]
+impl Eq for QpFirst {
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct SprayerHdr {
     pub src_port: u16,
     pub padding: u8,
-    pub qp_id: [u8;3],
+    pub first: [u8;3],
 }
 impl SprayerHdr {
     pub const LEN: usize = mem::size_of::<SprayerHdr>();
