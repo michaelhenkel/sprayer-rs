@@ -76,12 +76,18 @@ ssh 192.168.105.6 "sudo ip netns exec r1 tcpdump -U -nni r1_link2 -w -" | wiresh
 
 init_c1=$(ip -s l show dev r1_link1 |grep RX -A1|tail -1 |awk '{print $1}')
 init_c2=$(ip -s l show dev r1_link2 |grep RX -A1|tail -1 |awk '{print $1}')
+init_c3=$(ip -s l show dev r1_link3 |grep RX -A1|tail -1 |awk '{print $1}')
+init_c4=$(ip -s l show dev r1_link4 |grep RX -A1|tail -1 |awk '{print $1}')
 while true;
 do
 	c1=$(ip -s l show dev r1_link1 |grep RX -A1|tail -1 |awk '{print $1}')
 	c2=$(ip -s l show dev r1_link2 |grep RX -A1|tail -1 |awk '{print $1}')
+	c3=$(ip -s l show dev r1_link3 |grep RX -A1|tail -1 |awk '{print $1}')
+	c4=$(ip -s l show dev r1_link4 |grep RX -A1|tail -1 |awk '{print $1}')
 	echo r1_link1: $((${c1}-${init_c1}))
 	echo r1_link2: $((${c2}-${init_c2}))
+	echo r1_link3: $((${c3}-${init_c3}))
+	echo r1_link4: $((${c4}-${init_c4}))
 	sleep 1
 	clear
 done

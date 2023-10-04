@@ -15,7 +15,7 @@ aya-bpf = { git = "https://github.com/aya-rs/aya" }
 env_logger = "0.10"
 libc = "0.2"
 log = "0.4"
-tokio = { version = "1.32.0", features = ["macros", "rt", "rt-multi-thread", "net", "signal", "sync"] }
+tokio = { version = "1.32.0", features = ["macros", "rt", "rt-multi-thread", "net", "signal", "sync","time"] }
 interfaces = "0.0.9"
 nix = { version = "0.27.1", features = ["net"] }
 #libbpf-sys = "0.8.3"

@@ -183,29 +183,29 @@ impl Bth {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct QpFirst{
+pub struct QpSeq{
     pub dst_qpn: u32,
-    pub first: u32,
+    pub seq: u32,
 }
 #[cfg(feature = "user")]
-unsafe impl aya::Pod for QpFirst {}
+unsafe impl aya::Pod for QpSeq {}
 
 #[cfg(feature = "user")]
-impl Hash for QpFirst {
+impl Hash for QpSeq {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.dst_qpn.hash(state);
     }
 }
 
 #[cfg(feature = "user")]
-impl PartialEq for QpFirst {
+impl PartialEq for QpSeq {
     fn eq(&self, other: &Self) -> bool {
         self.dst_qpn == other.dst_qpn
     }
 }
 
 #[cfg(feature = "user")]
-impl Eq for QpFirst {
+impl Eq for QpSeq {
 }
 
 #[repr(C)]
