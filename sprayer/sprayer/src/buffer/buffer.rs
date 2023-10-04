@@ -1,7 +1,7 @@
 use aya::Bpf;
 use aya::maps::HashMap;
 use common::BthHdr;
-use log::{info, warn, debug};
+use log::{info, warn};
 use arraydeque::{ArrayDeque, Wrapping};
 use afxdp::mmap_area::{MmapArea, MmapAreaOptions};
 use afxdp::socket::{Socket, SocketOptions, SocketRx, SocketTx};
@@ -15,7 +15,6 @@ use libbpf_sys::{
     xsk_socket,
 };
 use std::collections::HashMap as ColHashMap;
-use std::f32::consts::E;
 use std::sync::Arc;
 use std::cmp::min;
 use network_types::{
@@ -36,10 +35,7 @@ pub struct Buffer{
     ingress_map_fd: i32,
     egress_map_fd: i32,
     xdp_decap_bpf: Bpf,
-    
-    //bth_map: HashMap<&'a mut MapData, u32, Bth>
 }
-//let mut v: ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping> = ArrayDeque::new();
 impl Buffer {
     pub fn new(ingress_intf: String, egress_intf: String, ingress_map_fd: i32, egress_map_fd: i32, xdp_decap_bpf: Bpf) -> Buffer {
         Buffer{
@@ -66,7 +62,7 @@ impl Buffer {
             let r = rx_state.cq.service(&mut bufs, BATCH_SIZE);
             match r {
                 Ok(_n) => {
-                    //////info!("serviced {} packets", n)
+                  //info!("serviced {} packets", n)
                 }
                 Err(err) => panic!("error: {:?}", err),
             }
@@ -114,7 +110,6 @@ impl Buffer {
                                                 if next_seq_num == seq_num {
                                                     next_seq_num += 1;
                                                     remove_sprayer_hdr(&mut v);
-
                                                     let data = v.get_data();
                                                     let data_ptr = data.as_ptr();
                                                     let eth_hdr = unsafe { &*(data_ptr as *const EthHdr) };
@@ -122,8 +117,6 @@ impl Buffer {
                                                     let src_mac = mac_to_int(eth_hdr.src_addr);
                                                     info!("src_mac: {}, dst_mac 2: {}",int_to_mac(src_mac as i64), int_to_mac(dst_mac as i64));
                                                     info!("pushing 1 {}", seq_num);
-                
-
                                                     tx_state.v.push_back(v);
                                                     if op_code == 2 {
                                                         match qp_seq_map.remove(&qp_first){
@@ -186,11 +179,9 @@ impl Buffer {
                             panic!("error: {:?}", err);
                         }
                     }
-
                 }
             }
         }
-        Ok(())
     }
 
     pub fn send<'a>(&mut self, buf: BufMmap<'a, BufCustom>, mut tx_state: State<'a>){
@@ -207,12 +198,9 @@ fn remove_sprayer_hdr<'a>(v: &mut BufMmap<'a, BufCustom>) {
     let ipv4_hdr = unsafe { ipv4_hdr_ptr.read() };
     let udp_hdr_ptr = (data_ptr as usize + EthHdr::LEN + Ipv4Hdr::LEN) as *mut UdpHdr;
     let udp_hdr = unsafe { udp_hdr_ptr.read() };
-    //let sprayer_hdr_ptr = (data_ptr as usize + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *mut SprayerHdr;
-    //let sprayer_hdr = unsafe { sprayer_hdr_ptr.read() };
     let bth_hdr_ptr = (data_ptr as usize + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + SprayerHdr::LEN) as *mut BthHdr;
     let bth_hdr = unsafe { bth_hdr_ptr.read() };
     data.rotate_left(SprayerHdr::LEN);
-
     let eth_hdr_ptr = data_ptr as *mut EthHdr;
     unsafe { eth_hdr_ptr.write(eth_hdr) };
     let ipv4_hdr_ptr = (data_ptr as usize + EthHdr::LEN) as *mut Ipv4Hdr;
