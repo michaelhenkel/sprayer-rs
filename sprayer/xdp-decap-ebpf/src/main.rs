@@ -4,14 +4,16 @@
 use core::mem::{self, zeroed, size_of};
 
 use aya_bpf::{
-    bindings::{xdp_action, bpf_fib_lookup as fib_lookup},
+    bindings::{xdp_action, bpf_fib_lookup as fib_lookup, bpf_spin_lock as spin_lock},
     macros::{xdp, map},
     helpers::{
         bpf_xdp_adjust_head,
         bpf_redirect,
         bpf_fib_lookup,
         bpf_redirect_map,
-        bpf_csum_diff
+        bpf_csum_diff,
+        bpf_spin_lock,
+        bpf_spin_unlock,
     },
     programs::XdpContext,
     maps::HashMap, cty::c_void, 
@@ -30,7 +32,7 @@ use common::{
     BthHdr,
     Bth,
     XskMap,
-    QpSeq,
+    QpSeq, SprayerHdr,
 };
 
 #[map(name = "ENCAPINTERFACE")]
@@ -46,8 +48,8 @@ static mut BTHMAP: HashMap<u32, Bth> =
     HashMap::<u32, Bth>::with_max_entries(1024, 0);
 
 #[map(name = "QPSEQMAP")]
-static mut QPSEQMAP: HashMap<QpSeq, u8> =
-    HashMap::<QpSeq, u8>::with_max_entries(2048, 0);
+static mut QPSEQMAP: HashMap<u32, u32> =
+    HashMap::<u32, u32>::with_max_entries(2048, 0);
 
 #[map(name = "BUFFERCOUNTER")]
 static mut BUFFERCOUNTER: HashMap<u8, u32> =
@@ -89,21 +91,22 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
     }
     let udp_hdr_ptr = ptr_at_mut::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(xdp_action::XDP_PASS)?;
     if u16::from_be(unsafe { (*udp_hdr_ptr).dest } ) != 3000 {
+        if u16::from_be(unsafe { (*udp_hdr_ptr).dest } ) == 4791 {
+            warn!(&ctx, "got plain bth");
+        } 
         return Ok(xdp_action::XDP_PASS);
     }
-    let bth_hdr_ptr = ptr_at_mut::<BthHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+    let sprayer_hdr_ptr = ptr_at_mut::<SprayerHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+    let bth_hdr_ptr = ptr_at_mut::<BthHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + SprayerHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
     
     let psn_seq_list = unsafe { (*bth_hdr_ptr).psn_seq };
     let psn_seq: u32 = u32::from_be_bytes([0, psn_seq_list[0], psn_seq_list[1], psn_seq_list[2]]);
     let dst_pqn_list = unsafe { (*bth_hdr_ptr).dest_qpn };
     let dst_qpn: u32 = u32::from_be_bytes([0, dst_pqn_list[0], dst_pqn_list[1], dst_pqn_list[2]]);
     let op_code = u8::from_be(unsafe { (*bth_hdr_ptr).opcode });
-    let udp_src_port = u16::from_be(unsafe { (*udp_hdr_ptr).source });
-    let origin_udp_src_port = unmask(udp_src_port, psn_seq);
-    let qp_seq = QpSeq{
-        dst_qpn,
-        seq: psn_seq,
-    };
+    let orig_udp_src_port = u16::from_be(unsafe { (*sprayer_hdr_ptr).src_port });
+    let current_first_list = unsafe { (*sprayer_hdr_ptr).first };
+    let prev_first_list = unsafe { (*sprayer_hdr_ptr).prev_first };
 
     let flow_next_hop = if let Some(flow_next_hop) = get_v4_next_hop_from_flow_table(&ctx){
         flow_next_hop
@@ -113,8 +116,22 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
         return Ok(xdp_action::XDP_PASS);
     };
 
+    let action = if let Some(next_seq) = unsafe { QPSEQMAP.get_ptr_mut(&dst_qpn) }{ 
+        if unsafe { *next_seq } == psn_seq {
+            unsafe { *next_seq = psn_seq + 1 };
+            warn!(&ctx, "{} in order, redirecting {}",op_code, psn_seq);
+            Action::REDIRECT
+        } else {
+            Action::BUFFER
+        }
+    
+    } else {
+        Action::BUFFER
+    };
+
+
     unsafe {
-        (*udp_hdr_ptr).source = u16::to_be(origin_udp_src_port);
+        (*udp_hdr_ptr).source = u16::to_be(orig_udp_src_port);
         (*udp_hdr_ptr).dest = u16::to_be(4791);
         (*eth_hdr_ptr).src_addr = flow_next_hop.src_mac;
         (*eth_hdr_ptr).dst_addr = flow_next_hop.dst_mac;
@@ -122,30 +139,30 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
 
     //info!(&ctx, "op_code {}, dst_qp {}, first {}, seq_num {}", op_code, dst_qpn, first, seq_num);
 
-    let action = if op_code == 0 {
-        let next_qp_psn_seq = QpSeq{
-            dst_qpn,
-            seq: psn_seq + 1,
-        };
-        unsafe { QPSEQMAP.insert(&next_qp_psn_seq, &0, 0) }.map_err(|_| xdp_action::XDP_PASS)?;
-        Action::REDIRECT
-    } else if op_code == 1 || op_code == 2{
-        if unsafe { QPSEQMAP.get_ptr(&qp_seq) }.is_some(){
-            unsafe { QPSEQMAP.remove(&qp_seq) }.map_err(|_| xdp_action::XDP_PASS)?;
-            if op_code == 1 {
-                let next_qp_psn_seq = QpSeq{
-                    dst_qpn,
-                    seq: psn_seq + 1,
-                };
-                unsafe { QPSEQMAP.insert(&next_qp_psn_seq, &0, 0) }.map_err(|_| xdp_action::XDP_PASS)?;
+
+    let action = if let Some(next_seq) = unsafe { QPSEQMAP.get_ptr_mut(&dst_qpn) }{ 
+        if unsafe { *next_seq } == psn_seq {
+            /*
+            if op_code == 2 {
+                unsafe { QPSEQMAP.remove(&dst_qpn) }.map_err(|_| xdp_action::XDP_PASS)?;
+            } else {
+                
             }
+            */
+            unsafe { *next_seq = psn_seq + 1 };
+            warn!(&ctx, "{} in order, redirecting {}",op_code, psn_seq);
             Action::REDIRECT
         } else {
-            warn!(&ctx, "middle/last out of order, buffering");
+            warn!(&ctx, "{} out of order, buffering {}",op_code, psn_seq);
             Action::BUFFER
         }
-    } else {
+    } else if op_code == 0 {
+        unsafe { QPSEQMAP.insert(&dst_qpn, &(psn_seq + 1), 0)}.map_err(|_| xdp_action::XDP_PASS)?;
+        warn!(&ctx, "{} in order, redirecting {}",op_code, psn_seq);
         Action::REDIRECT
+    } else {
+        warn!(&ctx, "{} out of order, buffering {}",op_code, psn_seq);
+        Action::BUFFER
     };
 
     let res = match action {

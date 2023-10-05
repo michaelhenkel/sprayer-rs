@@ -63,7 +63,7 @@ impl Buffer {
         };
         let mut rx_state = State::new(area.clone(), &mut bufs, StateType::Rx, self.ingress_intf.clone(), self.ingress_map_fd);
         let mut tx_state = State::new(area.clone(), &mut bufs, StateType::Tx, self.egress_intf.clone(), self.egress_map_fd);
-        let mut queue_ring: ColHashMap<(QpSeq,u8),BufMmap<BufCustom>> = ColHashMap::new();
+        let mut queue_ring: ColHashMap<QpSeq,BufMmap<BufCustom>> = ColHashMap::new();
 
         let rx = match rx_state.socket{
             SocketType::Rx(ref mut rx) => { Some(rx) }
@@ -80,6 +80,9 @@ impl Buffer {
 
         let mut batches = 0;
         let mut wait_time = 0;
+
+        let qp_seq_map = self.xdp_decap_bpf.map_mut("QPSEQMAP").unwrap();
+        let mut qp_seq_map: HashMap<_, u32, u32> = HashMap::try_from(qp_seq_map)?;
         
         loop {
             let r = rx_state.cq.service(&mut bufs, BATCH_SIZE);
@@ -111,30 +114,15 @@ impl Buffer {
                                     dst_qpn,
                                     seq: seq_num,
                                 };
-                                if let Some(qp_seq_map) = self.xdp_decap_bpf.map_mut("QPSEQMAP"){
-                                    let mut qp_seq_map: HashMap<_, QpSeq, u8> = HashMap::try_from(qp_seq_map)?;
-                                    if qp_seq_map.get(&qp_seq, 0).is_ok(){
-                                        qp_seq_map.remove(&qp_seq)?;
-                                        let next_qp_psn_seq = QpSeq{
-                                            dst_qpn,
-                                            seq: seq_num + 1,
-                                        };
-                                        if op_code == 1 {
-                                            qp_seq_map.insert(&next_qp_psn_seq, 0, 0)?;
-                                        }
-                                        tx_state.v.push_back(v);
-                                        wait_time = 0;
-                                    } else {
-                                        queue_ring.insert((qp_seq, 0), v);
-                                    }
-                                }                                        
+                                warn!("adding {}/{} to ring", op_code, qp_seq.seq);
+                                queue_ring.insert(qp_seq, v);                             
                             }
                         }
                     } else {
                         if rx_state.fq.needs_wakeup() {
                             rx.wake();
                         }
-                        wait_time = 10;
+                        wait_time = 2;
                     }
                 }
                 Err(err) => {
@@ -142,23 +130,40 @@ impl Buffer {
                 }
             }
             if queue_ring.len() > 0 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(wait_time)).await;
-                if let Some(qp_seq_map) = self.xdp_decap_bpf.map_mut("QPSEQMAP"){
-                    let mut qp_seq_map: HashMap<_, QpSeq, u8> = HashMap::try_from(qp_seq_map)?;
-                    let mut qp_seq_remove_list = Vec::new();
-                    for res in qp_seq_map.iter(){
-                        let (mut qp_seq, _) = res?;
-                        while let Some(v) = queue_ring.remove(&(qp_seq, 0)){
-                            qp_seq_remove_list.push(qp_seq.clone());
-                            qp_seq.seq += 1;
-                            tx_state.v.push_back(v);
-                        } 
-                    }
-                    for qp_seq in qp_seq_remove_list{
-                        qp_seq_map.remove(&qp_seq)?;
+                //tokio::time::sleep(tokio::time::Duration::from_millis(wait_time)).await;
+                let mut res_list = Vec::new();
+                for res in qp_seq_map.iter(){
+                    if let Ok((dst_qpn, seq)) = res {
+                        let mut qp_seq = QpSeq{
+                            dst_qpn,
+                            seq,
+                        };
+                        while let Some(v) = queue_ring.remove(&qp_seq){
+                            warn!("removed {} from ring", qp_seq.seq);
+                            res_list.push((qp_seq, v));
+                            qp_seq.seq += 1;                            
+                        }
                     }
                 }
+                for (qp_seq, v) in res_list{
+                    let data = v.get_data();
+                    let data_ptr = data.as_ptr() as usize;
+                    let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
+                    let op_code = unsafe { u8::from_be((*bth_hdr).opcode) };
+                    /*
+                    if op_code == 2 {
+                        qp_seq_map.remove(&qp_seq.dst_qpn)?;
+                    } else {
+                        
+                    }
+                    */
+                    qp_seq_map.insert(qp_seq.dst_qpn, qp_seq.seq + 1, 0)?;
+                    warn!("redirecting {} {} {}", op_code, qp_seq.dst_qpn, qp_seq.seq);
+                    tx_state.v.push_back(v);
+                }
             }
+
+
 
             if tx_state.v.len() > 0 {
                 if tx.try_send(&mut tx_state.v, BATCH_SIZE).is_ok(){

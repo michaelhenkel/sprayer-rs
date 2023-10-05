@@ -29,7 +29,7 @@ end
 
 -- Register the Sprayer protocol as a dissector for UDP port 1234
 udp_table = DissectorTable.get("udp.port")
-udp_table:add(4791, sprayer_proto)
+udp_table:add(3000, sprayer_proto)
 
 -- Define the main dissector function for the packet
 function sprayer_dissector(buffer, pinfo, tree)
@@ -58,6 +58,6 @@ function sprayer_dissector(buffer, pinfo, tree)
 end
 
 -- Register the main dissector function for the packet
-local sprayer_port = 4791
+local sprayer_port = 3000
 local sprayer_dis = Dissector.get("sprayer")
 DissectorTable.get("udp.port"):add(sprayer_port, sprayer_dis)

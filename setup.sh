@@ -101,9 +101,9 @@ tc qdisc del dev r2_link1 root netem
 tc qdisc del dev r2_link2 root netem
 tc qdisc del dev r2_link3 root netem
 
-tc qdisc add dev r1_link1 root netem delay 120ms
-tc qdisc add dev r1_link2 root netem delay 130ms
-tc qdisc add dev r1_link3 root netem delay 140ms
+tc qdisc add dev r1_link1 root netem delay 12ms
+tc qdisc add dev r1_link2 root netem delay 13ms
+tc qdisc add dev r1_link3 root netem delay 14ms
 
 
 tc qdisc del dev r1_link1 root netem

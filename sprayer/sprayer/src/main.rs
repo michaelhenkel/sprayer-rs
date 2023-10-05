@@ -7,7 +7,7 @@ use aya_log::BpfLogger;
 use clap::Parser;
 use log::{info, warn, debug};
 use tokio::signal;
-use common::{Interface, Bth};
+use common::{Interface, QpSeq};
 
 use std::ffi::CString;
 use std::mem::zeroed;

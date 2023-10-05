@@ -46,8 +46,12 @@ static mut FLOWTABLE: HashMap<FlowKey, FlowNextHop> =
 static mut XSKMAP: XskMap<u32, u32> =
     XskMap::<u32, u32>::with_max_entries(64, 0);
 
-#[map(name = "CURRENTQPID")]
-static mut CURRENTQPID: HashMap<[u8;3], [u8;3]> =
+#[map(name = "CURRENTFIRST")]
+static mut CURRENTFIRST: HashMap<[u8;3], [u8;3]> =
+    HashMap::<[u8;3], [u8;3]>::with_max_entries(2048, 0);
+
+#[map(name = "PREVFIRST")]
+static mut PREVFIRST: HashMap<[u8;3], [u8;3]> =
     HashMap::<[u8;3], [u8;3]>::with_max_entries(2048, 0);
 
 #[xdp]
@@ -92,7 +96,6 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
     if u16::from_be(unsafe { (*udp_hdr_ptr).dest } ) != 4791 {
         return Ok(xdp_action::XDP_PASS);
     }
-
     let bth_hdr_ptr = ptr_at_mut::<BthHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
 
     let flow_next_hop = if let Some(flow_next_hop) = get_v4_next_hop_from_flow_table(&ctx){
@@ -105,15 +108,95 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
 
     let psn_seq_list = unsafe { (*bth_hdr_ptr).psn_seq };
     let psn_seq: u32 = u32::from_be_bytes([0, psn_seq_list[0], psn_seq_list[1], psn_seq_list[2]]);
+    let dst_qp_list = unsafe { (*bth_hdr_ptr).dest_qpn };
+    //let dst_qp: u32 = u32::from_be_bytes([0, dst_qp_list[0], dst_qp_list[1], dst_qp_list[2]]);
+    let op_code = u8::from_be(unsafe { (*bth_hdr_ptr).opcode });
     let udp_src_port = u16::from_be(unsafe { (*udp_hdr_ptr).source });
-    let new_udp_src_port = mask(udp_src_port, psn_seq);
+    let new_udp_src_port = u16::from(psn_seq_list[1]) << 8 | u16::from(psn_seq_list[2]);
+    let new_udp_src_port = hash_16bit(new_udp_src_port);
+    let udp_len = u16::from_be(unsafe { (*udp_hdr_ptr).len } );
+    let ipv4_tot_len = u16::from_be(unsafe { (*ipv4_hdr_ptr).tot_len } );
+
+    let mut prev_first = None;
+    let mut current_first = None;
+
+ 
+    if let Some(_prev_first) = unsafe { PREVFIRST.get(&dst_qp_list) }{
+        let p = *_prev_first;
+        prev_first = Some(p);
+    }
+
+     
+    if let Some(_current_first) = unsafe { CURRENTFIRST.get(&dst_qp_list) }{
+        let c = *_current_first;
+        current_first = Some(c);
+    }
+    
+    
+
+    if op_code == 0 {
+        if prev_first.is_none(){
+            unsafe { PREVFIRST.insert(&dst_qp_list, &psn_seq_list, 0) }.map_err(|_| xdp_action::XDP_PASS)?;
+            prev_first = Some(psn_seq_list)
+        }
+        unsafe { CURRENTFIRST.insert(&dst_qp_list, &psn_seq_list, 0) }.map_err(|_| xdp_action::XDP_PASS)?;
+        current_first = Some(psn_seq_list)
+    }
+
+    let (prev_first, first) = if prev_first.is_none() || current_first.is_none() {
+        warn!(&ctx, "prev_first and/or current_first not found");
+        return Ok(xdp_action::XDP_PASS);
+    } else {
+        (prev_first.unwrap(), current_first.unwrap())
+    };
+
+    if op_code == 2{
+        unsafe { PREVFIRST.insert(&dst_qp_list, &first, 0) }.map_err(|_| xdp_action::XDP_PASS)?;
+        unsafe { CURRENTFIRST.remove(&dst_qp_list) }.map_err(|_| xdp_action::XDP_PASS)?;
+    }
+
     unsafe {
         (*eth_hdr_ptr).src_addr = flow_next_hop.src_mac;
         (*eth_hdr_ptr).dst_addr = flow_next_hop.dst_mac;
         (*udp_hdr_ptr).source = u16::to_be(new_udp_src_port);
         (*udp_hdr_ptr).dest = u16::to_be(3000);
+        (*udp_hdr_ptr).len = u16::to_be(udp_len + SprayerHdr::LEN as u16);
         (*udp_hdr_ptr).check = 0;
+        (*ipv4_hdr_ptr).tot_len = u16::to_be(ipv4_tot_len + SprayerHdr::LEN as u16);
+        (*ipv4_hdr_ptr).check = 0;
     };
+
+    let ip_csum = csum(ipv4_hdr_ptr as *const Ipv4Hdr as *mut u32, Ipv4Hdr::LEN as u32, 0);
+
+    unsafe { (*ipv4_hdr_ptr).check = ip_csum};
+
+    let eth_hdr = unsafe { eth_hdr_ptr.read() };
+    let ipv4_hdr = unsafe { ipv4_hdr_ptr.read() };
+    let udp_hdr = unsafe { udp_hdr_ptr.read() };
+    let bth_hdr = unsafe { bth_hdr_ptr.read() };
+    let sprayer_hdr = SprayerHdr{
+        src_port: u16::from_be(udp_src_port),
+        padding: 0,
+        first,
+        prev_first,
+    };
+
+    unsafe { bpf_xdp_adjust_head(ctx.ctx, -(SprayerHdr::LEN as i32)) };
+
+    let eth_hdr_ptr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
+    let ipv4_hdr_ptr = ptr_at_mut::<Ipv4Hdr>(&ctx, EthHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+    let udp_hdr_ptr = ptr_at_mut::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+    let sprayer_hdr_ptr = ptr_at_mut::<SprayerHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+    let bth_hdr_ptr = ptr_at_mut::<BthHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + SprayerHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+
+    unsafe {
+        eth_hdr_ptr.write(eth_hdr);
+        ipv4_hdr_ptr.write(ipv4_hdr);
+        udp_hdr_ptr.write(udp_hdr);
+        sprayer_hdr_ptr.write(sprayer_hdr);
+        bth_hdr_ptr.write(bth_hdr);
+    }
+
     let res = unsafe { bpf_redirect(decap_intf.ifidx, 0) };
     Ok(res as u32)
 }
