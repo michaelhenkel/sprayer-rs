@@ -91,9 +91,6 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
     }
     let udp_hdr_ptr = ptr_at_mut::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(xdp_action::XDP_PASS)?;
     if u16::from_be(unsafe { (*udp_hdr_ptr).dest } ) != 3000 {
-        if u16::from_be(unsafe { (*udp_hdr_ptr).dest } ) == 4791 {
-            warn!(&ctx, "got plain bth");
-        } 
         return Ok(xdp_action::XDP_PASS);
     }
     let sprayer_hdr_ptr = ptr_at_mut::<SprayerHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
@@ -105,8 +102,14 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
     let dst_qpn: u32 = u32::from_be_bytes([0, dst_pqn_list[0], dst_pqn_list[1], dst_pqn_list[2]]);
     let op_code = u8::from_be(unsafe { (*bth_hdr_ptr).opcode });
     let orig_udp_src_port = u16::from_be(unsafe { (*sprayer_hdr_ptr).src_port });
-    let current_first_list = unsafe { (*sprayer_hdr_ptr).first };
-    let prev_first_list = unsafe { (*sprayer_hdr_ptr).prev_first };
+    let start_seq_list = unsafe { (*sprayer_hdr_ptr).start_seq };
+    let start_seq: u32 = u32::from_be_bytes([0, start_seq_list[0], start_seq_list[1], start_seq_list[2]]);
+    let udp_len = u16::from_be(unsafe { (*udp_hdr_ptr).len } );
+    let ipv4_tot_len = u16::from_be(unsafe { (*ipv4_hdr_ptr).tot_len } );
+
+    if op_code == 17 {
+        return Ok(xdp_action::XDP_PASS);
+    }
 
     let flow_next_hop = if let Some(flow_next_hop) = get_v4_next_hop_from_flow_table(&ctx){
         flow_next_hop
@@ -116,54 +119,53 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface) -> Result<u32, u32> {
         return Ok(xdp_action::XDP_PASS);
     };
 
-    let action = if let Some(next_seq) = unsafe { QPSEQMAP.get_ptr_mut(&dst_qpn) }{ 
+    let action = if start_seq_list == psn_seq_list{
+        unsafe { QPSEQMAP.insert(&dst_qpn, &(psn_seq + 1), 0)}.map_err(|_| xdp_action::XDP_PASS)?;
+        Action::REDIRECT
+    } else if let Some(next_seq) = unsafe { QPSEQMAP.get_ptr_mut(&dst_qpn) }{ 
         if unsafe { *next_seq } == psn_seq {
             unsafe { *next_seq = psn_seq + 1 };
-            warn!(&ctx, "{} in order, redirecting {}",op_code, psn_seq);
             Action::REDIRECT
         } else {
             Action::BUFFER
         }
-    
     } else {
         Action::BUFFER
     };
-
 
     unsafe {
-        (*udp_hdr_ptr).source = u16::to_be(orig_udp_src_port);
-        (*udp_hdr_ptr).dest = u16::to_be(4791);
         (*eth_hdr_ptr).src_addr = flow_next_hop.src_mac;
         (*eth_hdr_ptr).dst_addr = flow_next_hop.dst_mac;
+        (*ipv4_hdr_ptr).tot_len = u16::to_be(ipv4_tot_len - SprayerHdr::LEN as u16);
+        (*ipv4_hdr_ptr).check = 0;
+        (*udp_hdr_ptr).source = u16::to_be(orig_udp_src_port);
+        (*udp_hdr_ptr).dest = u16::to_be(4791);
+        (*udp_hdr_ptr).len = u16::to_be(udp_len - SprayerHdr::LEN as u16);
+        (*udp_hdr_ptr).check = 0;
     };
 
-    //info!(&ctx, "op_code {}, dst_qp {}, first {}, seq_num {}", op_code, dst_qpn, first, seq_num);
+    let ip_csum = csum(ipv4_hdr_ptr as *const Ipv4Hdr as *mut u32, Ipv4Hdr::LEN as u32, 0);
 
+    unsafe { (*ipv4_hdr_ptr).check = ip_csum};
 
-    let action = if let Some(next_seq) = unsafe { QPSEQMAP.get_ptr_mut(&dst_qpn) }{ 
-        if unsafe { *next_seq } == psn_seq {
-            /*
-            if op_code == 2 {
-                unsafe { QPSEQMAP.remove(&dst_qpn) }.map_err(|_| xdp_action::XDP_PASS)?;
-            } else {
-                
-            }
-            */
-            unsafe { *next_seq = psn_seq + 1 };
-            warn!(&ctx, "{} in order, redirecting {}",op_code, psn_seq);
-            Action::REDIRECT
-        } else {
-            warn!(&ctx, "{} out of order, buffering {}",op_code, psn_seq);
-            Action::BUFFER
-        }
-    } else if op_code == 0 {
-        unsafe { QPSEQMAP.insert(&dst_qpn, &(psn_seq + 1), 0)}.map_err(|_| xdp_action::XDP_PASS)?;
-        warn!(&ctx, "{} in order, redirecting {}",op_code, psn_seq);
-        Action::REDIRECT
-    } else {
-        warn!(&ctx, "{} out of order, buffering {}",op_code, psn_seq);
-        Action::BUFFER
-    };
+    let eth_hdr = unsafe { eth_hdr_ptr.read() };
+    let ipv4_hdr = unsafe { ipv4_hdr_ptr.read() };
+    let udp_hdr = unsafe { udp_hdr_ptr.read() };
+    let bth_hdr = unsafe { bth_hdr_ptr.read() };
+
+    unsafe { bpf_xdp_adjust_head(ctx.ctx, SprayerHdr::LEN as i32) };
+
+    let eth_hdr_ptr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
+    let ipv4_hdr_ptr = ptr_at_mut::<Ipv4Hdr>(&ctx, EthHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+    let udp_hdr_ptr = ptr_at_mut::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+    let bth_hdr_ptr = ptr_at_mut::<BthHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
+
+    unsafe {
+        eth_hdr_ptr.write(eth_hdr);
+        ipv4_hdr_ptr.write(ipv4_hdr);
+        udp_hdr_ptr.write(udp_hdr);
+        bth_hdr_ptr.write(bth_hdr);
+    }
 
     let res = match action {
         Action::REDIRECT => {

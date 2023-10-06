@@ -54,6 +54,14 @@ static mut CURRENTFIRST: HashMap<[u8;3], [u8;3]> =
 static mut PREVFIRST: HashMap<[u8;3], [u8;3]> =
     HashMap::<[u8;3], [u8;3]>::with_max_entries(2048, 0);
 
+#[map(name = "STARTSEQ")]
+static mut STARTSEQ: HashMap<[u8;3], [u8;3]> =
+    HashMap::<[u8;3], [u8;3]>::with_max_entries(2048, 0);
+
+#[map(name = "ENDSEQ")]
+static mut ENDSEQ: HashMap<[u8;3], [u8;3]> =
+    HashMap::<[u8;3], [u8;3]>::with_max_entries(2048, 0);
+
 #[xdp]
 pub fn xdp_encap(ctx: XdpContext) -> u32 {
     ////info!(&ctx, "xdp_encap");
@@ -117,43 +125,20 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
     let udp_len = u16::from_be(unsafe { (*udp_hdr_ptr).len } );
     let ipv4_tot_len = u16::from_be(unsafe { (*ipv4_hdr_ptr).tot_len } );
 
-    let mut prev_first = None;
-    let mut current_first = None;
 
- 
-    if let Some(_prev_first) = unsafe { PREVFIRST.get(&dst_qp_list) }{
-        let p = *_prev_first;
-        prev_first = Some(p);
-    }
-
-     
-    if let Some(_current_first) = unsafe { CURRENTFIRST.get(&dst_qp_list) }{
-        let c = *_current_first;
-        current_first = Some(c);
-    }
-    
-    
-
-    if op_code == 0 {
-        if prev_first.is_none(){
-            unsafe { PREVFIRST.insert(&dst_qp_list, &psn_seq_list, 0) }.map_err(|_| xdp_action::XDP_PASS)?;
-            prev_first = Some(psn_seq_list)
-        }
-        unsafe { CURRENTFIRST.insert(&dst_qp_list, &psn_seq_list, 0) }.map_err(|_| xdp_action::XDP_PASS)?;
-        current_first = Some(psn_seq_list)
-    }
-
-    let (prev_first, first) = if prev_first.is_none() || current_first.is_none() {
-        warn!(&ctx, "prev_first and/or current_first not found");
+    if op_code == 17 {
         return Ok(xdp_action::XDP_PASS);
-    } else {
-        (prev_first.unwrap(), current_first.unwrap())
-    };
-
-    if op_code == 2{
-        unsafe { PREVFIRST.insert(&dst_qp_list, &first, 0) }.map_err(|_| xdp_action::XDP_PASS)?;
-        unsafe { CURRENTFIRST.remove(&dst_qp_list) }.map_err(|_| xdp_action::XDP_PASS)?;
     }
+
+    let start_seq = if let Some(start_seq) = unsafe { STARTSEQ.get(&dst_qp_list) }{
+        *start_seq
+    } else if op_code == 0 {
+        unsafe { STARTSEQ.insert(&dst_qp_list, &psn_seq_list, 0) }.map_err(|_| xdp_action::XDP_ABORTED)?;
+        psn_seq_list
+    } else {
+        warn!(&ctx, "no start_seq op_code: {}, seq: {}", op_code, psn_seq);
+        return Ok(xdp_action::XDP_ABORTED);
+    };
 
     unsafe {
         (*eth_hdr_ptr).src_addr = flow_next_hop.src_mac;
@@ -177,8 +162,7 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, links: u8) -> Result<u3
     let sprayer_hdr = SprayerHdr{
         src_port: u16::from_be(udp_src_port),
         padding: 0,
-        first,
-        prev_first,
+        start_seq,
     };
 
     unsafe { bpf_xdp_adjust_head(ctx.ctx, -(SprayerHdr::LEN as i32)) };

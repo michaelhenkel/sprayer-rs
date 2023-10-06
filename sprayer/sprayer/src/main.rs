@@ -282,7 +282,7 @@ async fn main() -> Result<(), anyhow::Error> {
             panic!("EGRESSXSKMAP map not found");
         };
 
-        let mut buf = Buffer::new(decap_intf.clone(), encap_intf.clone(), ingress_map_fd, egress_map_fd, xdp_decap_bpf);
+        let mut buf = Buffer::new(decap_intf.clone(), encap_intf.clone(), ingress_map_fd, egress_map_fd, xdp_decap_bpf, xdp_encap_bpf);
 
         match buf.run().await{
             Ok(_) => {},

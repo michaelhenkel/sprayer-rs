@@ -35,15 +35,17 @@ pub struct Buffer{
     ingress_map_fd: i32,
     egress_map_fd: i32,
     xdp_decap_bpf: Bpf,
+    xdp_encap_bpf: Bpf,
 }
 impl Buffer {
-    pub fn new(ingress_intf: String, egress_intf: String, ingress_map_fd: i32, egress_map_fd: i32, xdp_decap_bpf: Bpf) -> Buffer {
+    pub fn new(ingress_intf: String, egress_intf: String, ingress_map_fd: i32, egress_map_fd: i32, xdp_decap_bpf: Bpf, xdp_encap_bpf: Bpf) -> Buffer {
         Buffer{
             ingress_intf,
             egress_intf,
             ingress_map_fd,
             egress_map_fd,
             xdp_decap_bpf,
+            xdp_encap_bpf,
         }
     }
     pub async fn watch(&mut self) -> anyhow::Result<()>{
@@ -63,7 +65,7 @@ impl Buffer {
         };
         let mut rx_state = State::new(area.clone(), &mut bufs, StateType::Rx, self.ingress_intf.clone(), self.ingress_map_fd);
         let mut tx_state = State::new(area.clone(), &mut bufs, StateType::Tx, self.egress_intf.clone(), self.egress_map_fd);
-        let mut queue_ring: ColHashMap<QpSeq,BufMmap<BufCustom>> = ColHashMap::new();
+        let mut queue_ring: ColHashMap<(u32,u32),BufMmap<BufCustom>> = ColHashMap::new();
 
         let rx = match rx_state.socket{
             SocketType::Rx(ref mut rx) => { Some(rx) }
@@ -79,7 +81,6 @@ impl Buffer {
         let custom = BufCustom {};
 
         let mut batches = 0;
-        let mut wait_time = 0;
 
         let qp_seq_map = self.xdp_decap_bpf.map_mut("QPSEQMAP").unwrap();
         let mut qp_seq_map: HashMap<_, u32, u32> = HashMap::try_from(qp_seq_map)?;
@@ -114,15 +115,13 @@ impl Buffer {
                                     dst_qpn,
                                     seq: seq_num,
                                 };
-                                warn!("adding {}/{} to ring", op_code, qp_seq.seq);
-                                queue_ring.insert(qp_seq, v);                             
+                                queue_ring.insert((dst_qpn, seq_num), v);
                             }
                         }
                     } else {
                         if rx_state.fq.needs_wakeup() {
                             rx.wake();
                         }
-                        wait_time = 2;
                     }
                 }
                 Err(err) => {
@@ -130,7 +129,7 @@ impl Buffer {
                 }
             }
             if queue_ring.len() > 0 {
-                //tokio::time::sleep(tokio::time::Duration::from_millis(wait_time)).await;
+                //tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 let mut res_list = Vec::new();
                 for res in qp_seq_map.iter(){
                     if let Ok((dst_qpn, seq)) = res {
@@ -138,8 +137,7 @@ impl Buffer {
                             dst_qpn,
                             seq,
                         };
-                        while let Some(v) = queue_ring.remove(&qp_seq){
-                            warn!("removed {} from ring", qp_seq.seq);
+                        while let Some(v) = queue_ring.remove(&(dst_qpn, seq)){
                             res_list.push((qp_seq, v));
                             qp_seq.seq += 1;                            
                         }
@@ -150,20 +148,10 @@ impl Buffer {
                     let data_ptr = data.as_ptr() as usize;
                     let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
                     let op_code = unsafe { u8::from_be((*bth_hdr).opcode) };
-                    /*
-                    if op_code == 2 {
-                        qp_seq_map.remove(&qp_seq.dst_qpn)?;
-                    } else {
-                        
-                    }
-                    */
                     qp_seq_map.insert(qp_seq.dst_qpn, qp_seq.seq + 1, 0)?;
-                    warn!("redirecting {} {} {}", op_code, qp_seq.dst_qpn, qp_seq.seq);
                     tx_state.v.push_back(v);
                 }
             }
-
-
 
             if tx_state.v.len() > 0 {
                 if tx.try_send(&mut tx_state.v, BATCH_SIZE).is_ok(){
