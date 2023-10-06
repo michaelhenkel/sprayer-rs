@@ -211,9 +211,7 @@ impl Eq for QpSeq {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct SprayerHdr {
-    pub src_port: u16,
-    pub padding: u8,
-    pub start_seq: [u8;3],
+    pub first_seq: [u8;3],
 }
 impl SprayerHdr {
     pub const LEN: usize = mem::size_of::<SprayerHdr>();

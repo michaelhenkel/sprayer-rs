@@ -48,14 +48,6 @@ impl Buffer {
             xdp_encap_bpf,
         }
     }
-    pub async fn watch(&mut self) -> anyhow::Result<()>{
-        loop {
-            if let Some(qp_seq_map) = self.xdp_decap_bpf.map_mut("QPSEQMAP"){
-                let mut qp_seq_map: HashMap<_, QpSeq, u8> = HashMap::try_from(qp_seq_map)?;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        }
-    }
     pub async fn run(&mut self) -> anyhow::Result<()>{
         let options = MmapAreaOptions{ huge_tlb: false };
         let map_area = MmapArea::new(BUF_NUM, BUFF_SIZE, options);
@@ -65,7 +57,7 @@ impl Buffer {
         };
         let mut rx_state = State::new(area.clone(), &mut bufs, StateType::Rx, self.ingress_intf.clone(), self.ingress_map_fd);
         let mut tx_state = State::new(area.clone(), &mut bufs, StateType::Tx, self.egress_intf.clone(), self.egress_map_fd);
-        let mut queue_ring: ColHashMap<(u32,u32),BufMmap<BufCustom>> = ColHashMap::new();
+        let mut queue_ring: ColHashMap<([u8;3],u32),BufMmap<BufCustom>> = ColHashMap::new();
 
         let rx = match rx_state.socket{
             SocketType::Rx(ref mut rx) => { Some(rx) }
@@ -82,8 +74,8 @@ impl Buffer {
 
         let mut batches = 0;
 
-        let qp_seq_map = self.xdp_decap_bpf.map_mut("QPSEQMAP").unwrap();
-        let mut qp_seq_map: HashMap<_, u32, u32> = HashMap::try_from(qp_seq_map)?;
+        let next_seq_map = self.xdp_decap_bpf.map_mut("NEXTSEQ").unwrap();
+        let mut next_seq_map: HashMap<_, [u8;3], u32> = HashMap::try_from(next_seq_map)?;
         
         loop {
             let r = rx_state.cq.service(&mut bufs, BATCH_SIZE);
@@ -102,20 +94,13 @@ impl Buffer {
                                 let data: &[u8] = v.get_data();
                                 let data_ptr = data.as_ptr() as usize;
                                 let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
-                                let op_code = unsafe { u8::from_be((*bth_hdr).opcode) };
-                                let dst_qpn = {
-                                    let dst_qp = unsafe { (*bth_hdr).dest_qpn };
-                                    u32::from_be_bytes([0, dst_qp[0], dst_qp[1], dst_qp[2]])
-                                };
+                                let dst_qp = unsafe { (*bth_hdr).dest_qpn };
                                 let seq_num = {
                                     let seq_num = unsafe { (*bth_hdr).psn_seq };
                                     u32::from_be_bytes([0, seq_num[0], seq_num[1], seq_num[2]])
                                 };
-                                let qp_seq = QpSeq {
-                                    dst_qpn,
-                                    seq: seq_num,
-                                };
-                                queue_ring.insert((dst_qpn, seq_num), v);
+                                warn!("adding seq_num: {} to ring", seq_num);
+                                queue_ring.insert((dst_qp, seq_num), v);
                             }
                         }
                     } else {
@@ -131,24 +116,24 @@ impl Buffer {
             if queue_ring.len() > 0 {
                 //tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 let mut res_list = Vec::new();
-                for res in qp_seq_map.iter(){
-                    if let Ok((dst_qpn, seq)) = res {
-                        let mut qp_seq = QpSeq{
-                            dst_qpn,
-                            seq,
-                        };
+                for res in next_seq_map.iter(){
+                    if let Ok((dst_qpn, mut seq)) = res {
+                        
+                        warn!("checking seq_num: {} in ring", seq);
                         while let Some(v) = queue_ring.remove(&(dst_qpn, seq)){
-                            res_list.push((qp_seq, v));
-                            qp_seq.seq += 1;                            
+                            warn!("removing seq_num: {} from ring", seq);
+                            res_list.push(((dst_qpn, seq), v));
+                            seq += 1;                            
                         }
                     }
                 }
-                for (qp_seq, v) in res_list{
+                for ((dst_qpn, seq), v) in res_list{
                     let data = v.get_data();
                     let data_ptr = data.as_ptr() as usize;
                     let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
-                    let op_code = unsafe { u8::from_be((*bth_hdr).opcode) };
-                    qp_seq_map.insert(qp_seq.dst_qpn, qp_seq.seq + 1, 0)?;
+                    let op_code: u8 = unsafe { u8::from_be((*bth_hdr).opcode) };
+                    warn!("adding seq_num: {} to send buffer", seq);
+                    next_seq_map.insert(dst_qpn, seq + 1, 0)?;
                     tx_state.v.push_back(v);
                 }
             }
