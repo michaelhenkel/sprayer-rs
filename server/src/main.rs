@@ -49,21 +49,49 @@ async fn run_udp_server(port: u16, ip: String) -> io::Result<()> {
     let sock = UdpSocket::bind(&bindaddr).await?;
     println!("listening on {}", bindaddr);
 
-    let mut buf = [0; 4];
+    //let mut buf = [0; 4];
+    let mut prev_seq = 0;
+    let mut packets = 0;
     loop {
-        let (_len, _addr) = sock.recv_from(&mut buf).await?;
-        let bth_hdr: *const BthHdr = &buf as *const _ as *const BthHdr; 
-        let bth_hdr = unsafe { *bth_hdr };
-        println!("bth_hdr: {:?}", bth_hdr);
-        /*
-        println!("port {}: {} bytes received from {}", port, len, addr);
-        println!(
-            "port {}: buffer contents: {}",
-            port,
-            String::from_utf8_lossy(&buf)
-        );
-        */
+        // Wait for the socket to be readable
+        sock.readable().await?;
+
+        // The buffer is **not** included in the async task and will
+        // only exist on the stack.
+        let mut buf = [0; 1024];
+
+        // Try to recv data, this may still fail with `WouldBlock`
+        // if the readiness event is a false positive.
+        match sock.try_recv(&mut buf) {
+            Ok(n) => {
+                let bth_hdr: *const BthHdr = &buf[..n] as *const _ as *const BthHdr; 
+                let bth_hdr: BthHdr = unsafe { *bth_hdr };
+                let dst_qp_list = bth_hdr.dest_qpn;
+                let dst_qp = u32::from_be_bytes([0, dst_qp_list[0], dst_qp_list[1], dst_qp_list[2]]);
+                let seq_list = bth_hdr.psn_seq;
+                let seq = u32::from_be_bytes([0, seq_list[0], seq_list[1], seq_list[2]]);
+                let op_code = u8::from_be(bth_hdr.opcode);
+                println!("opcode: {}, qp: {}, seq: {}", op_code, dst_qp, seq);
+                if prev_seq > 0 {
+                    if prev_seq + 1 != seq {
+                        println!("seq error: prev: {}, curr: {}", prev_seq, seq);
+                    }
+                }
+                prev_seq = seq;
+                packets += 1;
+                
+                println!("received {} packets", packets);
+                
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                continue;
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
     }
+    Ok(())
 }
 
 async fn run_tcp_server(port: u16, ip: String) -> io::Result<()> {

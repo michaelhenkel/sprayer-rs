@@ -90,6 +90,8 @@ struct Opt {
     links: u8,
     #[clap(short, long)]
     dummy: Option<String>,
+    #[clap(short, long)]
+    buffer: Option<bool>,
 }
 
 #[tokio::main]
@@ -103,6 +105,11 @@ async fn main() -> Result<(), anyhow::Error> {
     if opt.dummy.is_some() && (opt.decap.is_some() || opt.encap.is_some()){
         panic!("dummy cannot be defined with encap or decap");
     }
+
+    let buffer = match opt.buffer{
+        Some(buffer) => { buffer },
+        None => { true }
+    };
 
 
 
@@ -230,6 +237,18 @@ async fn main() -> Result<(), anyhow::Error> {
             warn!("LINKS map not found");
         }
 
+        if let Some(buf_map) = xdp_encap_bpf.map_mut("BUFFER"){
+            let mut buf_map: HashMap<_, u8, u8> = HashMap::try_from(buf_map)?;
+            if buffer{
+                buf_map.insert(&0, &1, 0)?;
+            } else {
+                buf_map.insert(&0, &0, 0)?;
+            }
+            
+        } else {
+            warn!("encap buf map not found");
+        }
+
         if let Some(counter_map) = xdp_encap_bpf.map_mut("COUNTER"){
             let mut counter_map: HashMap<_, u8, u8> = HashMap::try_from(counter_map)?;
             counter_map.insert(&0, &0, 0)?;
@@ -258,14 +277,17 @@ async fn main() -> Result<(), anyhow::Error> {
             warn!("ENCAPINTERFACE map not found");
         }
 
-        /*
-        let bth_map = if let Some(bth_map) = xdp_decap_bpf.map_mut("BTHMAP"){
-            let  bth_map: HashMap<_, u32, Bth> = HashMap::try_from(bth_map)?;
-            bth_map
+        if let Some(buf_map) = xdp_decap_bpf.map_mut("BUFFER"){
+            let mut buf_map: HashMap<_, u8, u8> = HashMap::try_from(buf_map)?;
+            if buffer{
+                buf_map.insert(&0, &1, 0)?;
+            } else {
+                buf_map.insert(&0, &0, 0)?;
+            }
+            
         } else {
-            panic!("BTHMAP map not found");
-        };
-        */
+            warn!("decap buf map not found");
+        }
 
         info!("load xsk map");
         let ingress_map_fd = if let Some(xsk_map) = xdp_decap_bpf.map("INGRESSXSKMAP") {

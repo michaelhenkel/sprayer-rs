@@ -26,9 +26,11 @@ use common::QpSeq;
 #[derive(Default, Copy, Clone)]
 pub struct BufCustom {}
 
-const BUFF_SIZE: usize = 2048;
-const BUF_NUM: usize = 65535 * 2;
+const BUFF_SIZE: usize = 4096;
+const BUF_NUM: usize = 65535 * 4;
 const BATCH_SIZE: usize = 64;
+const FILL_THRESHOLD: usize = 64;
+
 pub struct Buffer{
     ingress_intf: String,
     egress_intf: String,
@@ -71,38 +73,50 @@ impl Buffer {
         };
         let tx = tx.unwrap();
         let custom = BufCustom {};
-
-        let mut batches = 0;
-
         let next_seq_map = self.xdp_decap_bpf.map_mut("NEXTSEQ").unwrap();
         let mut next_seq_map: HashMap<_, [u8;3], u32> = HashMap::try_from(next_seq_map)?;
-        
+        let mut last_seq = ([0u8;3], 0);
+        //let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(1));
         loop {
             let r = rx_state.cq.service(&mut bufs, BATCH_SIZE);
             match r {
-                Ok(_n) => {
-                  //info!("serviced {} packets", n)
+                Ok(n) => {
+                    if n > 0 {
+                        warn!("serviced {} packets", n)
+                    }
+                  
                 }
                 Err(err) => panic!("error: {:?}", err),
             }
             match rx.try_recv(&mut rx_state.v, BATCH_SIZE, custom) {
                 Ok(n) => {
                     if n > 0 {
-                        batches = n;
-                        for _ in 0..n {
-                            if let Some(v) = rx_state.v.pop_front(){
-                                let data: &[u8] = v.get_data();
-                                let data_ptr = data.as_ptr() as usize;
-                                let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
-                                let dst_qp = unsafe { (*bth_hdr).dest_qpn };
-                                let seq_num = {
-                                    let seq_num = unsafe { (*bth_hdr).psn_seq };
-                                    u32::from_be_bytes([0, seq_num[0], seq_num[1], seq_num[2]])
-                                };
-                                warn!("adding seq_num: {} to ring", seq_num);
-                                queue_ring.insert((dst_qp, seq_num), v);
+                        rx_state.fq_deficit += n;
+                        //warn!("received {} packets", n);
+                        while let Some(v) = rx_state.v.pop_front(){
+                            let data: &[u8] = v.get_data();
+                            let data_ptr = data.as_ptr() as usize;
+                            let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
+                            let dst_qp = unsafe { (*bth_hdr).dest_qpn };
+                            let seq_num = {
+                                let seq_num = unsafe { (*bth_hdr).psn_seq };
+                                u32::from_be_bytes([0, seq_num[0], seq_num[1], seq_num[2]])
+                            };
+                            //warn!("adding seq_num: {} to ring", seq_num);
+                            queue_ring.insert((dst_qp, seq_num), v);
+                        }
+                        if queue_ring.len() > 0 {                
+                            for res in next_seq_map.iter(){
+                                if let Ok((dst_qpn, mut seq)) = res {
+                                    while let Some(v) = queue_ring.remove(&(dst_qpn, seq)){
+                                        last_seq = (dst_qpn, seq);
+                                        tx_state.v.push_back(v);
+                                        seq += 1;
+                                    }
+                                }
                             }
                         }
+                        
                     } else {
                         if rx_state.fq.needs_wakeup() {
                             rx.wake();
@@ -113,40 +127,34 @@ impl Buffer {
                     panic!("error: {:?}", err);
                 }
             }
-            if queue_ring.len() > 0 {
-                //tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                let mut res_list = Vec::new();
+            if queue_ring.len() > 0 {   
+                //interval.tick().await; 
                 for res in next_seq_map.iter(){
                     if let Ok((dst_qpn, mut seq)) = res {
-                        
-                        warn!("checking seq_num: {} in ring", seq);
                         while let Some(v) = queue_ring.remove(&(dst_qpn, seq)){
-                            warn!("removing seq_num: {} from ring", seq);
-                            res_list.push(((dst_qpn, seq), v));
-                            seq += 1;                            
+                            last_seq = (dst_qpn, seq);
+                            tx_state.v.push_back(v);
+                            seq += 1;
                         }
                     }
                 }
-                for ((dst_qpn, seq), v) in res_list{
-                    let data = v.get_data();
-                    let data_ptr = data.as_ptr() as usize;
-                    let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
-                    let op_code: u8 = unsafe { u8::from_be((*bth_hdr).opcode) };
-                    warn!("adding seq_num: {} to send buffer", seq);
-                    next_seq_map.insert(dst_qpn, seq + 1, 0)?;
-                    tx_state.v.push_back(v);
-                }
             }
-
-            if tx_state.v.len() > 0 {
+            for (k,v) in queue_ring.drain(){
+                tx_state.v.push_back(v);
+            }
+            if !tx_state.v.is_empty() {
                 if tx.try_send(&mut tx_state.v, BATCH_SIZE).is_ok(){
-                    rx_state.fq_deficit += batches;
+                    
                 }
             }
-            if rx_state.fq_deficit > 0 {
+            if last_seq.0 != [0,0,0] && last_seq.1 > 0{
+                next_seq_map.insert(last_seq.0, last_seq.1+1, 0)?;
+            }
+            if rx_state.fq_deficit >= FILL_THRESHOLD {
                 let r = rx_state.fq.fill(&mut bufs, rx_state.fq_deficit);
                 match r {
                     Ok(n) => {
+                        warn!("filling {} buffers", n);
                         rx_state.fq_deficit -= n;
                     }
                     Err(err) => panic!("error: {:?}", err),
@@ -195,8 +203,10 @@ impl <'a>State<'a>{
         let intf = intf.as_str();
         let umem = Umem::new(
             area.clone(),
-            XSK_RING_CONS__DEFAULT_NUM_DESCS,
-            XSK_RING_PROD__DEFAULT_NUM_DESCS,
+            4096,
+            4096
+            //XSK_RING_CONS__DEFAULT_NUM_DESCS,
+            //XSK_RING_PROD__DEFAULT_NUM_DESCS,
         );
         let (umem1, cq, mut fq) = match umem {
             Ok(umem) => umem,
@@ -205,13 +215,15 @@ impl <'a>State<'a>{
         let mut options = SocketOptions::default();
         options.zero_copy_mode = false;
         options.copy_mode = true;
+        
         let (skt, skt_type) = match state_type{
             StateType::Rx => {
                 let socket = Socket::new_rx(
                     umem1.clone(),
                     intf,
                     0,
-                    XSK_RING_CONS__DEFAULT_NUM_DESCS,
+                    //XSK_RING_CONS__DEFAULT_NUM_DESCS,
+                    4096,
                     options,
                     1
                 );
@@ -226,7 +238,8 @@ impl <'a>State<'a>{
                     umem1.clone(),
                     intf,
                     0,
-                    XSK_RING_PROD__DEFAULT_NUM_DESCS,
+                    //XSK_RING_PROD__DEFAULT_NUM_DESCS,
+                    4096,
                     options,
                     1
                 );
@@ -241,11 +254,13 @@ impl <'a>State<'a>{
 
         let r = fq.fill(
             bufs,
-            min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, BUF_NUM),
+            //min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, BUF_NUM),
+            4096,
         );
         match r {
             Ok(n) => {
-                if n != min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, BUF_NUM) {
+                //if n != min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, BUF_NUM) {
+                    if n != 4096 {
                     panic!(
                         "Initial fill of umem incomplete. Wanted {} got {}.",
                         BUF_NUM, n

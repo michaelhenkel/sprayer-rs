@@ -34,6 +34,10 @@ static mut LINKS: HashMap<u8, u8> =
 static mut COUNTER: HashMap<u8, u8> =
     HashMap::<u8, u8>::with_max_entries(1, 0);
 
+#[map(name = "BUFFER")]
+static mut BUFFER: HashMap<u8, u8> =
+    HashMap::<u8, u8>::with_max_entries(1, 0);
+
 #[map(name = "DECAPINTERFACE")]
 static mut DECAPINTERFACE: HashMap<u32, Interface> =
     HashMap::<u32, Interface>::with_max_entries(1, 0);
@@ -87,13 +91,26 @@ pub fn xdp_encap(ctx: XdpContext) -> u32 {
         }
     };
 
-    match try_xdp_encap(ctx, *intf) {
+    let buf = match unsafe { BUFFER.get(&0) } {
+        Some(buff) => {
+            if *buff == 1 {
+                true
+            } else {
+                false
+            }
+        }
+        None => {
+            true
+        }
+    };
+
+    match try_xdp_encap(ctx, *intf, buf) {
         Ok(ret) => ret,
         Err(_) => xdp_action::XDP_ABORTED,
     }
 }
 
-fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface) -> Result<u32, u32> {
+fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, buf: bool) -> Result<u32, u32> {
     let eth_hdr_ptr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
     if unsafe{ (*eth_hdr_ptr).ether_type } != EtherType::Ipv4 {
         return Ok(xdp_action::XDP_PASS);
@@ -122,12 +139,6 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface) -> Result<u32, u32> {
     let op_code = u8::from_be(unsafe { (*bth_hdr_ptr).opcode });
     let udp_src_port = u16::from_be(unsafe { (*udp_hdr_ptr).source });
     let new_udp_src_port = mask(udp_src_port, psn_seq);
-    let udp_len = u16::from_be(unsafe { (*udp_hdr_ptr).len } );
-    let ipv4_tot_len = u16::from_be(unsafe { (*ipv4_hdr_ptr).tot_len } );
-
-    if op_code == 17 {
-        return Ok(xdp_action::XDP_PASS);
-    }
 
     unsafe {
         (*eth_hdr_ptr).src_addr = flow_next_hop.src_mac;
@@ -135,78 +146,47 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface) -> Result<u32, u32> {
         (*udp_hdr_ptr).source = u16::to_be(new_udp_src_port);
         (*udp_hdr_ptr).check = 0;
     }
-
-    if op_code == 0 {
-        let new_message = if let Some(next_seq) = unsafe { NEXTSEQ.get_ptr_mut(&dst_qp_list) }{
-            if unsafe { *next_seq } != psn_seq{
-                true
+    if buf{
+        if op_code == 0 {
+            let new_message = if let Some(next_seq) = unsafe { NEXTSEQ.get_ptr_mut(&dst_qp_list) }{
+                if unsafe { *next_seq } != psn_seq{
+                    true
+                } else {
+                    false
+                }
             } else {
-                false
+                true
+            };
+            if unsafe { FIRSTCOUNTER.get_ptr_mut(&dst_qp_list) }.is_none() || new_message{
+                let fc: u32 = 1;
+                let fc_bytes = fc.to_be_bytes();
+                let fc_list: [u8;3] = [fc_bytes[1], fc_bytes[2], fc_bytes[3]];
+                unsafe { FIRSTCOUNTER.insert(&dst_qp_list, &fc_list, 0) }.map_err(|_| xdp_action::XDP_ABORTED)?;
+                unsafe { (*bth_hdr_ptr).res = u8::to_be(1) };
             }
-        } else {
-            true
-        };
-
-        if unsafe { FIRSTCOUNTER.get_ptr_mut(&dst_qp_list) }.is_none() || new_message{
-            let fc: u32 = 1;
-            let fc_bytes = fc.to_be_bytes();
-            let fc_list: [u8;3] = [fc_bytes[1], fc_bytes[2], fc_bytes[3]];
-            unsafe { FIRSTCOUNTER.insert(&dst_qp_list, &fc_list, 0) }.map_err(|_| xdp_action::XDP_ABORTED)?;
-            let sprayer_hdr = SprayerHdr{
-                first_seq: psn_seq_list,
-            };
-            unsafe {
-                (*udp_hdr_ptr).dest = u16::to_be(3000);
-                (*udp_hdr_ptr).len = u16::to_be(udp_len + SprayerHdr::LEN as u16);
-                (*ipv4_hdr_ptr).tot_len = u16::to_be(ipv4_tot_len + SprayerHdr::LEN as u16);
-                (*ipv4_hdr_ptr).check = 0;
-            };
-    
-            let ip_csum = csum(ipv4_hdr_ptr as *const Ipv4Hdr as *mut u32, Ipv4Hdr::LEN as u32, 0);
-            unsafe { (*ipv4_hdr_ptr).check = ip_csum};
-    
-            let eth_hdr = unsafe { eth_hdr_ptr.read() };
-            let ipv4_hdr = unsafe { ipv4_hdr_ptr.read() };
-            let udp_hdr = unsafe { udp_hdr_ptr.read() };
-            let bth_hdr = unsafe { bth_hdr_ptr.read() };
-    
-            unsafe { bpf_xdp_adjust_head(ctx.ctx, -(SprayerHdr::LEN as i32)) };
-        
-            let eth_hdr_ptr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
-            let ipv4_hdr_ptr = ptr_at_mut::<Ipv4Hdr>(&ctx, EthHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
-            let udp_hdr_ptr = ptr_at_mut::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(xdp_action::XDP_PASS)?;
-            let sprayer_hdr_ptr = ptr_at_mut::<SprayerHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
-            let bth_hdr_ptr = ptr_at_mut::<BthHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + SprayerHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
-        
-            unsafe {
-                eth_hdr_ptr.write(eth_hdr);
-                ipv4_hdr_ptr.write(ipv4_hdr);
-                udp_hdr_ptr.write(udp_hdr);
-                sprayer_hdr_ptr.write(sprayer_hdr);
-                bth_hdr_ptr.write(bth_hdr);
+        } else if op_code == 2{
+            if let Some(last_counter) = unsafe { LASTCOUNTER.get_ptr_mut(&dst_qp_list) }{
+                let last_counter_list = unsafe { *last_counter };
+                let mut fc: u32 = u32::from_be_bytes([0, last_counter_list[0], last_counter_list[1], last_counter_list[2]]);
+                fc += 1;
+                let fc_bytes = fc.to_be_bytes();
+                let fc_list: [u8;3] = [fc_bytes[1], fc_bytes[2], fc_bytes[3]];
+                unsafe { *last_counter = fc_list };
+            } else {
+                let fc: u32 = 1;
+                let fc_bytes = fc.to_be_bytes();
+                let fc_list: [u8;3] = [fc_bytes[1], fc_bytes[2], fc_bytes[3]];
+                unsafe { LASTCOUNTER.insert(&dst_qp_list, &fc_list, 0) }.map_err(|_| xdp_action::XDP_ABORTED)?;
             }
         }
-    } else if op_code == 2{
-        if let Some(last_counter) = unsafe { LASTCOUNTER.get_ptr_mut(&dst_qp_list) }{
-            let last_counter_list = unsafe { *last_counter };
-            let mut fc: u32 = u32::from_be_bytes([0, last_counter_list[0], last_counter_list[1], last_counter_list[2]]);
-            fc += 1;
-            let fc_bytes = fc.to_be_bytes();
-            let fc_list: [u8;3] = [fc_bytes[1], fc_bytes[2], fc_bytes[3]];
-            unsafe { *last_counter = fc_list };
-        } else {
-            let fc: u32 = 1;
-            let fc_bytes = fc.to_be_bytes();
-            let fc_list: [u8;3] = [fc_bytes[1], fc_bytes[2], fc_bytes[3]];
-            unsafe { LASTCOUNTER.insert(&dst_qp_list, &fc_list, 0) }.map_err(|_| xdp_action::XDP_ABORTED)?;
+        if op_code == 0 || op_code == 1 || op_code == 2 {
+            if let Some(next_seq) = unsafe { NEXTSEQ.get_ptr_mut(&dst_qp_list) }{
+                unsafe { *next_seq = psn_seq + 1 };
+            } else {
+                unsafe { NEXTSEQ.insert(&dst_qp_list, &(psn_seq + 1), 0) }.map_err(|_| xdp_action::XDP_ABORTED)?;
+            };
         }
     }
-
-    if let Some(next_seq) = unsafe { NEXTSEQ.get_ptr_mut(&dst_qp_list) }{
-        unsafe { *next_seq = psn_seq + 1 };
-    } else {
-        unsafe { NEXTSEQ.insert(&dst_qp_list, &(psn_seq + 1), 0) }.map_err(|_| xdp_action::XDP_ABORTED)?;
-    };
 
     let res = unsafe { bpf_redirect(decap_intf.ifidx, 0) };
     Ok(res as u32)
@@ -215,7 +195,7 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface) -> Result<u32, u32> {
 #[inline(always)]
 fn mask(port: u16, num: u32) -> u16 {
     port ^ num as u16
-  }
+}
 
 #[inline(always)]
 fn hash_16bit(num: u16) -> u16 {
@@ -257,20 +237,20 @@ fn csum_fold_helper(csum: i64) -> u16 {
 
 #[inline(always)]
 fn get_v4_next_hop_from_flow_table(ctx: &XdpContext) -> Option<FlowNextHop>{
-    let ipv4_proto_ptr = ptr_at::<u8>(&ctx, EthHdr::LEN + 9)?;
-    let ipv4_src_dst_port_ptr = ptr_at::<SrcDst>(&ctx, EthHdr::LEN + 12)?;
+    let ipv4_hdr_ptr = ptr_at::<Ipv4Hdr>(&ctx, EthHdr::LEN)?;
+    let udp_hdr_ptr = ptr_at::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
     let mut flow_key: FlowKey = unsafe { zeroed() };
-    flow_key.dst_ip = unsafe { (*ipv4_src_dst_port_ptr).dst_ip };
-    flow_key.src_ip = unsafe { (*ipv4_src_dst_port_ptr).src_ip };
-    flow_key.dst_port = unsafe { (*ipv4_src_dst_port_ptr).dst_port };
-    flow_key.src_port = unsafe { (*ipv4_src_dst_port_ptr).src_port };
-    flow_key.ip_proto = unsafe { *ipv4_proto_ptr };
+    flow_key.dst_ip = unsafe { (*ipv4_hdr_ptr).dst_addr };
+    flow_key.src_ip = unsafe { (*ipv4_hdr_ptr).src_addr };
+    flow_key.dst_port = unsafe { (*udp_hdr_ptr).dest };
+    flow_key.src_port = unsafe { (*udp_hdr_ptr).source };
+    flow_key.ip_proto = unsafe { (*ipv4_hdr_ptr).proto as u8 };
     match unsafe { FLOWTABLE.get(&flow_key) } {
         Some(fnh) => {
             return Some(fnh.clone())
         }
         None => {
-            //info!(ctx, "flow_next_hop not found");
+            warn!(ctx, "flow_next_hop not found");
             return None;
         }
     }

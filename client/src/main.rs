@@ -30,7 +30,15 @@ struct Opt {
     #[clap(short, long, default_value = "lima1")]
     iface: String,
     #[clap(short, long, default_value = "config.yaml")]
-    config: String,
+    config: Option<String>,
+    #[clap(short, long, default_value = "5")]
+    messages: Option<u32>,
+    #[clap(short, long, default_value = "5")]
+    packets: Option<u32>,
+    #[clap(short, long, default_value = "5")]
+    qpid: Option<u32>,
+    #[clap(short, long, default_value = "100")]
+    start: Option<u32>,
 }
 
 fn read_yaml_file(file_path: &str) -> Result<Vec<Message>, anyhow::Error> {
@@ -118,6 +126,31 @@ enum BthSeqType{
     Last,
 }
 
+fn get_messages(messages: u32, packets: u32, qpid: u32, start: u32) -> Vec<Message>{
+    let mut msgs = Vec::new();
+    for i in 0..messages{
+        let mut sequence = Vec::new();
+        for j in 0..packets{
+            let sequence_type = if j == 0{
+                BthSeqType::First
+            } else if j == packets - 1{
+                BthSeqType::Last
+            } else {
+                BthSeqType::Middle
+            };
+            sequence.push(Sequence{
+                sequence_type,
+                id: start + j,
+            });
+        }
+        msgs.push(Message{
+            qp_id: qpid,
+            sequence,
+        });
+    }
+    msgs
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()>{
     let opt = Opt::parse();
@@ -126,7 +159,14 @@ async fn main() -> anyhow::Result<()>{
     let sock = UdpSocket::bind(ip_port).await?;
     let remote_addr = opt.dst.parse::<SocketAddr>()?;
     sock.connect(remote_addr).await?;
-    let messages = read_yaml_file(&opt.config)?;
+    let messages = if opt.messages.is_some() && opt.packets.is_some() && opt.qpid.is_some() && opt.start.is_some(){
+        get_messages(opt.messages.unwrap(), opt.packets.unwrap(), opt.qpid.unwrap(), opt.start.unwrap())
+    } else if let Some(config) = opt.config{
+        read_yaml_file(&config)?
+    } else {
+        panic!("either config or messages, packets, qpid, and start must be specified");
+    };
+    //let messages = read_yaml_file(&opt.config)?;
     for msg in messages {
         let bth_seq = BthSeq::from(msg);
         for bth_hdr in bth_seq.messages{
