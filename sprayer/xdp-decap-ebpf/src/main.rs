@@ -177,7 +177,7 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface, buf: bool) -> Result<u3
         //warn!(&ctx, "got psn_seq: {}", psn_seq);
         if op_code == 17 {
             Action::REDIRECT
-        } else if res == 1{
+        } else if op_code == 0 && res == 1{
             match unsafe { NEXTSEQ.insert(&dst_qp_list, &(psn_seq + 1), 0)}{
                 Ok(_) => {
                     unsafe { (*bth_hdr_ptr).res = 0 };

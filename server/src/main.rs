@@ -1,5 +1,6 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
+use std::collections::HashSet;
 use std::io;
 use clap::Parser;
 use common::BthHdr;
@@ -52,6 +53,12 @@ async fn run_udp_server(port: u16, ip: String) -> io::Result<()> {
     //let mut buf = [0; 4];
     let mut prev_seq = 0;
     let mut packets = 0;
+    let mut out_of_order_packets = 0;
+    let mut total_bytes = 0;
+    let mut start = tokio::time::Instant::now();
+    let mut new_round = true;
+    let mut end_of_round = false;
+    let mut ooo_packets = Vec::new();
     loop {
         // Wait for the socket to be readable
         sock.readable().await?;
@@ -64,6 +71,11 @@ async fn run_udp_server(port: u16, ip: String) -> io::Result<()> {
         // if the readiness event is a false positive.
         match sock.try_recv(&mut buf) {
             Ok(n) => {
+
+                if new_round {
+                    start = tokio::time::Instant::now();
+                    new_round = false;
+                }
                 let bth_hdr: *const BthHdr = &buf[..n] as *const _ as *const BthHdr; 
                 let bth_hdr: BthHdr = unsafe { *bth_hdr };
                 let dst_qp_list = bth_hdr.dest_qpn;
@@ -71,17 +83,20 @@ async fn run_udp_server(port: u16, ip: String) -> io::Result<()> {
                 let seq_list = bth_hdr.psn_seq;
                 let seq = u32::from_be_bytes([0, seq_list[0], seq_list[1], seq_list[2]]);
                 let op_code = u8::from_be(bth_hdr.opcode);
-                println!("opcode: {}, qp: {}, seq: {}", op_code, dst_qp, seq);
+                let res = u8::from_be(bth_hdr.res);
                 if prev_seq > 0 {
                     if prev_seq + 1 != seq {
-                        println!("seq error: prev: {}, curr: {}", prev_seq, seq);
+                        ooo_packets.push((prev_seq+1, seq));
+                        out_of_order_packets += 1;
                     }
                 }
                 prev_seq = seq;
                 packets += 1;
-                
-                println!("received {} packets", packets);
-                
+                total_bytes += n;
+
+                if res == 1 {
+                    end_of_round = true;
+                }                
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 continue;
@@ -89,6 +104,26 @@ async fn run_udp_server(port: u16, ip: String) -> io::Result<()> {
             Err(e) => {
                 return Err(e);
             }
+        }
+
+        if end_of_round{
+            let elapsed = start.elapsed().as_secs_f64();
+            let mbps = (total_bytes as f64 * 8.0) / 1_000_000.0 / elapsed;
+            let total_megabytes = total_bytes as f64 / 1_000_000.0;
+            println!("{} packets received, {} out of order packets, {} MB received, {} MB/s", packets, out_of_order_packets, total_megabytes, mbps as u64);
+            if ooo_packets.len() > 0 {
+                println!("Out of order packets");
+                for (start, end) in &ooo_packets{
+                    println!("expected {} - got {}", start, end);
+                }
+            }
+            ooo_packets.clear();
+            end_of_round = false;
+            new_round = true;
+            prev_seq = 0;
+            packets = 0;
+            out_of_order_packets = 0;
+            total_bytes = 0;
         }
     }
     Ok(())

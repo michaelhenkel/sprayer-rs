@@ -1,3 +1,4 @@
+use rand::seq;
 use tokio::net::UdpSocket;
 use std::net::SocketAddr;
 use clap::Parser;
@@ -14,7 +15,7 @@ struct Sequence {
     #[serde(rename = "type")]
     sequence_type: BthSeqType,
     id: u32,
-    first: bool,
+    last: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -77,10 +78,12 @@ impl From<Message> for BthSeq{
     fn from(message: Message) -> Self{
         let qp_id = u32::to_be(message.qp_id);
         let qp_id = qp_id.to_le_bytes();
-        println!("qp_id: {:?}", qp_id);
         let mut bth_seq = BthSeq::new([qp_id[1], qp_id[2], qp_id[3]]);
         for sequence in message.sequence{
-            bth_seq.add_msg(sequence.sequence_type, sequence.id, false);
+            if sequence.last{
+                println!("last sequence: {:?}", sequence);
+            }
+            bth_seq.add_msg(sequence.sequence_type, sequence.id, sequence.last);
         }
         bth_seq
     }
@@ -93,14 +96,13 @@ impl BthSeq{
             qp_id,
         }
     }
-    fn add_msg(&mut self, bth_seq_type: BthSeqType, seq: u32, first: bool){
+    fn add_msg(&mut self, bth_seq_type: BthSeqType, seq: u32, last: bool){
         let seq = u32::to_be(seq);
         let seq = seq.to_le_bytes();
         let mut bth_hdr = BthHdr{
             opcode: 1,
             sol_event: 0,
             part_key: 65535,
-            //res: if first { 1 } else { 0 },
             res: 0,
             dest_qpn: self.qp_id,
             ack: 0,
@@ -116,6 +118,7 @@ impl BthSeq{
             BthSeqType::Last => {
                 bth_hdr.opcode = 2;
                 bth_hdr.ack = 128;
+                if last { bth_hdr.res = 1;}
             },
         }
         self.messages.push(bth_hdr);
@@ -132,10 +135,12 @@ enum BthSeqType{
 fn get_messages(messages: u32, packets: u32, qpid: u32, start: u32) -> Vec<Message>{
     let mut msgs = Vec::new();
     let mut seq_counter = start;
+    let tot_seq = messages * packets;
+    let mut num_seq_counter = 0;
     for i in 0..messages{
         let mut sequence = Vec::new();
         for j in 0..packets{
-            
+            num_seq_counter += 1;
             let sequence_type = if j == 0{
                 BthSeqType::First
             } else if j == packets - 1{
@@ -146,7 +151,7 @@ fn get_messages(messages: u32, packets: u32, qpid: u32, start: u32) -> Vec<Messa
             sequence.push(Sequence{
                 sequence_type,
                 id: seq_counter,
-                first: start == seq_counter,
+                last: tot_seq == num_seq_counter,
             });
             seq_counter += 1;
         }
@@ -181,7 +186,7 @@ async fn main() -> anyhow::Result<()>{
                 let ptr = &bth_hdr as *const BthHdr as *const u8;
                 std::slice::from_raw_parts(ptr, std::mem::size_of::<BthHdr>())
             };
-            println!("Sending BTH header: {:?}", bth_hdr);
+            //println!("Sending BTH header: {:?}", bth_hdr);
             let mut b = Vec::from(buf);
             let data = String::from("hello");
             let data_bytes = data.as_bytes();

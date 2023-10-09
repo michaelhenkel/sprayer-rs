@@ -27,11 +27,11 @@ use common::QpSeq;
 pub struct BufCustom {}
 
 const BUFF_SIZE: usize = 2048;
-const BUF_NUM: usize = 65535 * 8;
+const BUF_NUM: usize = 65535 * 4;
 const BATCH_SIZE: usize = 32;
 const FILL_THRESHOLD: usize = 32;
-const COMPLETION_RING_SIZE: u32 = XSK_RING_CONS__DEFAULT_NUM_DESCS * 16;
-const FILL_RING_SIZE: u32 = XSK_RING_PROD__DEFAULT_NUM_DESCS * 16;
+const COMPLETION_RING_SIZE: u32 = XSK_RING_CONS__DEFAULT_NUM_DESCS * 32;
+const FILL_RING_SIZE: u32 = XSK_RING_PROD__DEFAULT_NUM_DESCS * 32;
 const T: u64 = 0;
 
 pub struct Buffer{
@@ -83,6 +83,8 @@ impl Buffer {
         let mut queued_packets = 0;
         let mut service_round: usize = 0;
         let mut buffer_round: usize = 0;
+        let mut fill_ring_capacity = FILL_RING_SIZE as usize;
+        let mut max_buff = 0;
         
         loop {
             
@@ -92,26 +94,26 @@ impl Buffer {
                     if n > 0 {
                         service_counter += n;
                         service_round += 1;
-                        //warn!("service round {}", service_round);
-                        //warn!("serviced {} packets in last round", n);
-                        let total = buffer_counter - service_counter;
-                        //warn!("serviced/buffered/sent: {}/{}/{}, delta {}", service_counter, buffer_counter, sent_counter, total);
-                        //warn!("queued packets {}", queued_packets);
-                    } //else if service_counter != sent_counter {
-                      //  warn!("serviced/buffered/sent: {}/{}/{}, delta {}", service_counter, buffer_counter, sent_counter, buffer_counter - service_counter);
-                      //  continue;
-                    //}
+                        fill_ring_capacity += n;
+                        buffer_counter -= n;
+                        if max_buff < buffer_counter {
+                            max_buff = buffer_counter;
+                        }
+                        warn!("{} packets buffered. Max buffered packets {}. Fill deficit {}. Sent {}. Serviced {}.", buffer_counter, max_buff, rx_state.fq_deficit, sent_counter, n);
+                    }
                 }
                 Err(err) => panic!("error: {:?}", err),
             }
-            let mut pushed_packets = 0;
+            sent_counter = 0;
             match rx.try_recv(&mut rx_state.v, BATCH_SIZE, custom) {
                 Ok(n) => {
                     if n > 0 {
                         
+                        fill_ring_capacity -= n;
+                        buffer_counter += n;
                         //warn!("current buf size {}", bufs.len());
                         while let Some(v) = rx_state.v.pop_front(){
-                            pushed_packets += 1;
+                            
                             let data: &[u8] = v.get_data();
                             let data_ptr = data.as_ptr() as usize;
                             let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
@@ -120,7 +122,7 @@ impl Buffer {
                                 let seq_num = unsafe { (*bth_hdr).psn_seq };
                                 u32::from_be_bytes([0, seq_num[0], seq_num[1], seq_num[2]])
                             };
-                            buffer_counter += 1;
+                            
                             queue_ring.insert((dst_qp, seq_num), v);
                         }
                         //warn!("added {} packets to queue, new queue size {}", pushed_packets, queue_ring.len());
@@ -156,9 +158,9 @@ impl Buffer {
                         last_seq = Some((dst_qpn, seq));
                         k += 1;
                         buf.push_back(v);
-                        if k % 32 == 0 {
+                        if k % BATCH_SIZE == 0 {
                             //warn!("XX sending {} packets", buf.len());
-                            let p = send(tx, &mut buf, service_counter, sent_counter).await;
+                            let p = send(tx, &mut buf).await;
                             
 
                             //warn!("sent 1 {} packets, round {}", p, buffer_round);
@@ -169,7 +171,7 @@ impl Buffer {
 
                     
                     if buf.len() > 0 {
-                        let p = send(tx, &mut buf, service_counter, sent_counter).await;
+                        let p = send(tx, &mut buf).await;
                         sent_counter += p;
                     }
 
@@ -202,29 +204,14 @@ impl Buffer {
     }
 }
 
-async fn send<'a>(tx: &mut SocketTx<'a, BufCustom>, v: &mut ArrayDeque<[BufMmap<'a, BufCustom>; PENDING_LEN], Wrapping>, service_counter: usize, sent_counter: usize) -> usize{
+async fn send<'a>(tx: &mut SocketTx<'a, BufCustom>, v: &mut ArrayDeque<[BufMmap<'a, BufCustom>; PENDING_LEN], Wrapping>) -> usize{
     let p = v.len();
-    for x in &mut *v{
-        let data = x.get_data();
-        let data_ptr = data.as_ptr() as usize;
-        let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
-        //let dst_qp = unsafe { (*bth_hdr).dest_qpn };
-        let seq_num = {
-            let seq_num = unsafe { (*bth_hdr).psn_seq };
-            u32::from_be_bytes([0, seq_num[0], seq_num[1], seq_num[2]])
-        };
-        //warn!("sending packet with seq {}", seq_num);
-    }
-    //warn!("{} packets in tx queue before send", p);
     let mut sent_packets = 0;
     if tx.try_send(v, BATCH_SIZE).is_ok(){
         
         sent_packets = p;
     }
-    //warn!("{} packets in tx queue after send", p);
-    //if service_counter != sent_counter {
-        tokio::time::sleep(tokio::time::Duration::from_micros(T)).await;
-    //}
+    tokio::time::sleep(tokio::time::Duration::from_micros(T)).await;
     sent_packets
 }
 
