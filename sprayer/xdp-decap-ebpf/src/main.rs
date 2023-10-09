@@ -173,7 +173,8 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface, buf: bool) -> Result<u3
         (*udp_hdr_ptr).check = 0;
     };
 
-    let mut action = if buf {
+    let action = if buf {
+        //warn!(&ctx, "got psn_seq: {}", psn_seq);
         if op_code == 17 {
             Action::REDIRECT
         } else if res == 1{
@@ -186,7 +187,7 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface, buf: bool) -> Result<u3
                     return Ok(xdp_action::XDP_ABORTED);
                 }
             };
-            
+            //warn!(&ctx, "0 psn_seq: {}, next_seq: {}", psn_seq, psn_seq+1);
             Action::REDIRECT
         } else if let Some(next_seq) = unsafe { NEXTSEQ.get(&dst_qp_list) }{
             if *next_seq == psn_seq {
@@ -211,7 +212,6 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface, buf: bool) -> Result<u3
                         };
                     }
                 }
-                //unsafe { *next_seq = psn_seq + 1 };
                 match unsafe { NEXTSEQ.insert(&dst_qp_list, &(psn_seq + 1), 0)}{
                     Ok(_) => {}
                     Err(_) => {
@@ -219,17 +219,20 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface, buf: bool) -> Result<u3
                         return Ok(xdp_action::XDP_ABORTED);
                     }
                 };
+                //warn!(&ctx, "psn_seq: {}, next_seq: {}", psn_seq, psn_seq+1);
                 Action::REDIRECT
             } else {
+                //warn!(&ctx, "buffering psn_seq: {}, expected next_seq: {}", psn_seq, *next_seq);
                 Action::BUFFER
             }
         } else {
+            //warn!(&ctx, "buffering psn_seq: {} map empty", psn_seq);
             Action::BUFFER
         }
     } else {
         Action::REDIRECT
     };
-    action = Action::BUFFER;
+    //action = Action::BUFFER;
 
     let res = match action {
         Action::REDIRECT => {

@@ -8,12 +8,13 @@ use serde_yaml;
 use std::fs::File;
 use std::io::prelude::*;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Sequence {
     #[serde(rename = "type")]
     sequence_type: BthSeqType,
     id: u32,
+    first: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -66,6 +67,7 @@ fn get_ip_address_from_interface(iface_name: &str) -> Result<std::net::IpAddr, a
     Ok(ip)
 }
 
+#[derive(Clone, Debug)]
 struct BthSeq{
     messages: Vec<BthHdr>,
     qp_id: [u8;3],
@@ -78,7 +80,7 @@ impl From<Message> for BthSeq{
         println!("qp_id: {:?}", qp_id);
         let mut bth_seq = BthSeq::new([qp_id[1], qp_id[2], qp_id[3]]);
         for sequence in message.sequence{
-            bth_seq.add_msg(sequence.sequence_type, sequence.id);
+            bth_seq.add_msg(sequence.sequence_type, sequence.id, false);
         }
         bth_seq
     }
@@ -91,13 +93,14 @@ impl BthSeq{
             qp_id,
         }
     }
-    fn add_msg(&mut self, bth_seq_type: BthSeqType, seq: u32){
+    fn add_msg(&mut self, bth_seq_type: BthSeqType, seq: u32, first: bool){
         let seq = u32::to_be(seq);
         let seq = seq.to_le_bytes();
         let mut bth_hdr = BthHdr{
             opcode: 1,
             sol_event: 0,
             part_key: 65535,
+            //res: if first { 1 } else { 0 },
             res: 0,
             dest_qpn: self.qp_id,
             ack: 0,
@@ -119,7 +122,7 @@ impl BthSeq{
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 enum BthSeqType{
     First,
     Middle,
@@ -128,9 +131,11 @@ enum BthSeqType{
 
 fn get_messages(messages: u32, packets: u32, qpid: u32, start: u32) -> Vec<Message>{
     let mut msgs = Vec::new();
+    let mut seq_counter = start;
     for i in 0..messages{
         let mut sequence = Vec::new();
         for j in 0..packets{
+            
             let sequence_type = if j == 0{
                 BthSeqType::First
             } else if j == packets - 1{
@@ -140,8 +145,10 @@ fn get_messages(messages: u32, packets: u32, qpid: u32, start: u32) -> Vec<Messa
             };
             sequence.push(Sequence{
                 sequence_type,
-                id: start + j,
+                id: seq_counter,
+                first: start == seq_counter,
             });
+            seq_counter += 1;
         }
         msgs.push(Message{
             qp_id: qpid,

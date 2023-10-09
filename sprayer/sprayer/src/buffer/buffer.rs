@@ -26,10 +26,13 @@ use common::QpSeq;
 #[derive(Default, Copy, Clone)]
 pub struct BufCustom {}
 
-const BUFF_SIZE: usize = 4096;
-const BUF_NUM: usize = 65535 * 4;
-const BATCH_SIZE: usize = 64;
-const FILL_THRESHOLD: usize = 64;
+const BUFF_SIZE: usize = 2048;
+const BUF_NUM: usize = 65535 * 8;
+const BATCH_SIZE: usize = 32;
+const FILL_THRESHOLD: usize = 32;
+const COMPLETION_RING_SIZE: u32 = XSK_RING_CONS__DEFAULT_NUM_DESCS * 16;
+const FILL_RING_SIZE: u32 = XSK_RING_PROD__DEFAULT_NUM_DESCS * 16;
+const T: u64 = 0;
 
 pub struct Buffer{
     ingress_intf: String,
@@ -60,7 +63,6 @@ impl Buffer {
         let mut rx_state = State::new(area.clone(), &mut bufs, StateType::Rx, self.ingress_intf.clone(), self.ingress_map_fd);
         let mut tx_state = State::new(area.clone(), &mut bufs, StateType::Tx, self.egress_intf.clone(), self.egress_map_fd);
         let mut queue_ring: ColHashMap<([u8;3],u32),BufMmap<BufCustom>> = ColHashMap::new();
-
         let rx = match rx_state.socket{
             SocketType::Rx(ref mut rx) => { Some(rx) }
             _ => None,
@@ -75,25 +77,41 @@ impl Buffer {
         let custom = BufCustom {};
         let next_seq_map = self.xdp_decap_bpf.map_mut("NEXTSEQ").unwrap();
         let mut next_seq_map: HashMap<_, [u8;3], u32> = HashMap::try_from(next_seq_map)?;
-        let mut last_seq = ([0u8;3], 0);
-        //let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(1));
+        let mut buffer_counter = 0;
+        let mut service_counter: usize = 0;
+        let mut sent_counter: usize = 0;
+        let mut queued_packets = 0;
+        let mut service_round: usize = 0;
+        let mut buffer_round: usize = 0;
+        
         loop {
-            let r = rx_state.cq.service(&mut bufs, BATCH_SIZE);
+            
+            let r = tx_state.cq.service(&mut bufs, BATCH_SIZE);
             match r {
                 Ok(n) => {
                     if n > 0 {
-                        warn!("serviced {} packets", n)
-                    }
-                  
+                        service_counter += n;
+                        service_round += 1;
+                        //warn!("service round {}", service_round);
+                        //warn!("serviced {} packets in last round", n);
+                        let total = buffer_counter - service_counter;
+                        //warn!("serviced/buffered/sent: {}/{}/{}, delta {}", service_counter, buffer_counter, sent_counter, total);
+                        //warn!("queued packets {}", queued_packets);
+                    } //else if service_counter != sent_counter {
+                      //  warn!("serviced/buffered/sent: {}/{}/{}, delta {}", service_counter, buffer_counter, sent_counter, buffer_counter - service_counter);
+                      //  continue;
+                    //}
                 }
                 Err(err) => panic!("error: {:?}", err),
             }
+            let mut pushed_packets = 0;
             match rx.try_recv(&mut rx_state.v, BATCH_SIZE, custom) {
                 Ok(n) => {
                     if n > 0 {
-                        rx_state.fq_deficit += n;
-                        //warn!("received {} packets", n);
+                        
+                        //warn!("current buf size {}", bufs.len());
                         while let Some(v) = rx_state.v.pop_front(){
+                            pushed_packets += 1;
                             let data: &[u8] = v.get_data();
                             let data_ptr = data.as_ptr() as usize;
                             let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
@@ -102,21 +120,11 @@ impl Buffer {
                                 let seq_num = unsafe { (*bth_hdr).psn_seq };
                                 u32::from_be_bytes([0, seq_num[0], seq_num[1], seq_num[2]])
                             };
-                            //warn!("adding seq_num: {} to ring", seq_num);
+                            buffer_counter += 1;
                             queue_ring.insert((dst_qp, seq_num), v);
                         }
-                        if queue_ring.len() > 0 {                
-                            for res in next_seq_map.iter(){
-                                if let Ok((dst_qpn, mut seq)) = res {
-                                    while let Some(v) = queue_ring.remove(&(dst_qpn, seq)){
-                                        last_seq = (dst_qpn, seq);
-                                        tx_state.v.push_back(v);
-                                        seq += 1;
-                                    }
-                                }
-                            }
-                        }
-                        
+                        //warn!("added {} packets to queue, new queue size {}", pushed_packets, queue_ring.len());
+                        rx_state.fq_deficit += n;
                     } else {
                         if rx_state.fq.needs_wakeup() {
                             rx.wake();
@@ -127,42 +135,97 @@ impl Buffer {
                     panic!("error: {:?}", err);
                 }
             }
-            if queue_ring.len() > 0 {   
-                //interval.tick().await; 
+            
+            if queue_ring.len() > 0 {  
+                buffer_round += 1; 
+                let mut qp_list = Vec::new();
                 for res in next_seq_map.iter(){
-                    if let Ok((dst_qpn, mut seq)) = res {
-                        while let Some(v) = queue_ring.remove(&(dst_qpn, seq)){
-                            last_seq = (dst_qpn, seq);
-                            tx_state.v.push_back(v);
-                            seq += 1;
+                    if let Ok((dst_qpn, seq)) = res {
+                        qp_list.push((dst_qpn, seq));
+                    }
+                }                
+                while let Some((dst_qpn, mut seq)) = qp_list.pop(){
+                    let mut k = 0;
+                    let mut last_seq = None;
+                    let mut buf: ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping> = ArrayDeque::new();
+                    //warn!("waiting for seq {}",seq);
+                    let mut round_send: usize = 0;
+                    while let Some(v) = queue_ring.remove(&(dst_qpn, seq)){
+                        //warn!("got seq {}",seq);
+                        seq += 1;
+                        last_seq = Some((dst_qpn, seq));
+                        k += 1;
+                        buf.push_back(v);
+                        if k % 32 == 0 {
+                            //warn!("XX sending {} packets", buf.len());
+                            let p = send(tx, &mut buf, service_counter, sent_counter).await;
+                            
+
+                            //warn!("sent 1 {} packets, round {}", p, buffer_round);
+                            sent_counter += p;
+                            round_send += p;
                         }
                     }
-                }
-            }
-            for (k,v) in queue_ring.drain(){
-                tx_state.v.push_back(v);
-            }
-            if !tx_state.v.is_empty() {
-                if tx.try_send(&mut tx_state.v, BATCH_SIZE).is_ok(){
+
                     
+                    if buf.len() > 0 {
+                        let p = send(tx, &mut buf, service_counter, sent_counter).await;
+                        sent_counter += p;
+                    }
+
+                    if let Some((dst_qpn, seq)) = last_seq{
+                        next_seq_map.insert(dst_qpn, seq, 0)?;
+                    }                
                 }
+                queued_packets = queue_ring.len();
+                //warn!("buffer counter {}", buffer_counter);
+                //warn!("sent counter {}", sent_counter);
             }
-            if last_seq.0 != [0,0,0] && last_seq.1 > 0{
-                next_seq_map.insert(last_seq.0, last_seq.1+1, 0)?;
-            }
+            
             if rx_state.fq_deficit >= FILL_THRESHOLD {
+                //warn!("deficit before fill {}", rx_state.fq_deficit);
                 let r = rx_state.fq.fill(&mut bufs, rx_state.fq_deficit);
                 match r {
                     Ok(n) => {
-                        warn!("filling {} buffers", n);
+                        if n > 0 {
+                            //warn!("filled {} packets", n);
+                        }
                         rx_state.fq_deficit -= n;
                     }
                     Err(err) => panic!("error: {:?}", err),
                 }
+                //warn!("deficit after fill {}", rx_state.fq_deficit);
             }
-
+            
         }
+        
     }
+}
+
+async fn send<'a>(tx: &mut SocketTx<'a, BufCustom>, v: &mut ArrayDeque<[BufMmap<'a, BufCustom>; PENDING_LEN], Wrapping>, service_counter: usize, sent_counter: usize) -> usize{
+    let p = v.len();
+    for x in &mut *v{
+        let data = x.get_data();
+        let data_ptr = data.as_ptr() as usize;
+        let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
+        //let dst_qp = unsafe { (*bth_hdr).dest_qpn };
+        let seq_num = {
+            let seq_num = unsafe { (*bth_hdr).psn_seq };
+            u32::from_be_bytes([0, seq_num[0], seq_num[1], seq_num[2]])
+        };
+        //warn!("sending packet with seq {}", seq_num);
+    }
+    //warn!("{} packets in tx queue before send", p);
+    let mut sent_packets = 0;
+    if tx.try_send(v, BATCH_SIZE).is_ok(){
+        
+        sent_packets = p;
+    }
+    //warn!("{} packets in tx queue after send", p);
+    //if service_counter != sent_counter {
+        tokio::time::sleep(tokio::time::Duration::from_micros(T)).await;
+    //}
+    sent_packets
 }
 
 #[inline(always)]
@@ -203,10 +266,10 @@ impl <'a>State<'a>{
         let intf = intf.as_str();
         let umem = Umem::new(
             area.clone(),
-            4096,
-            4096
-            //XSK_RING_CONS__DEFAULT_NUM_DESCS,
-            //XSK_RING_PROD__DEFAULT_NUM_DESCS,
+            //4096,
+            //4096
+            COMPLETION_RING_SIZE,
+            FILL_RING_SIZE,
         );
         let (umem1, cq, mut fq) = match umem {
             Ok(umem) => umem,
@@ -222,8 +285,8 @@ impl <'a>State<'a>{
                     umem1.clone(),
                     intf,
                     0,
-                    //XSK_RING_CONS__DEFAULT_NUM_DESCS,
-                    4096,
+                    COMPLETION_RING_SIZE,
+                    //4096,
                     options,
                     1
                 );
@@ -238,8 +301,8 @@ impl <'a>State<'a>{
                     umem1.clone(),
                     intf,
                     0,
-                    //XSK_RING_PROD__DEFAULT_NUM_DESCS,
-                    4096,
+                    FILL_RING_SIZE,
+                    //4096,
                     options,
                     1
                 );
@@ -250,17 +313,15 @@ impl <'a>State<'a>{
                 (skt, SocketType::Tx(tx))
             },
         };
-
-
         let r = fq.fill(
             bufs,
-            //min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, BUF_NUM),
-            4096,
+            min(FILL_RING_SIZE as usize, BUF_NUM),
+            //4096,
         );
         match r {
             Ok(n) => {
-                //if n != min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, BUF_NUM) {
-                    if n != 4096 {
+                if n != min(FILL_RING_SIZE as usize, BUF_NUM) {
+                //if n != 4096 {
                     panic!(
                         "Initial fill of umem incomplete. Wanted {} got {}.",
                         BUF_NUM, n

@@ -1,3 +1,14 @@
+sudo apt install zsh gcc llvm-16-linker-tools libpolly-16-dev llvm-16 build-essential libz-dev pkg-config libssl-dev libelf-dev -y
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup install stable
+rustup toolchain install nightly --component rust-src
+cargo install --no-default-features bpf-linker
+cargo install cargo-generate
+cd /private/lima-build
+git clone https://github.com/michaelhenkel/sprayer-rs
+
+
 sudo ip link add name fabric type bridge
 sudo ip link set dev fabric up
 
@@ -101,9 +112,9 @@ tc qdisc del dev r2_link1 root netem
 tc qdisc del dev r2_link2 root netem
 tc qdisc del dev r2_link3 root netem
 
-tc qdisc add dev r1_link1 root netem delay 12ms
-tc qdisc add dev r1_link2 root netem delay 13ms
-tc qdisc add dev r1_link3 root netem delay 14ms
+tc qdisc add dev r1_link1 root netem delay 1ms
+tc qdisc add dev r1_link2 root netem delay 2ms
+tc qdisc add dev r1_link3 root netem delay 3ms
 
 
 tc qdisc del dev r1_link1 root netem
