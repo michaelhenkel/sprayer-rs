@@ -108,12 +108,9 @@ impl Buffer {
             match rx.try_recv(&mut rx_state.v, BATCH_SIZE, custom) {
                 Ok(n) => {
                     if n > 0 {
-                        
                         fill_ring_capacity -= n;
                         buffer_counter += n;
-                        //warn!("current buf size {}", bufs.len());
                         while let Some(v) = rx_state.v.pop_front(){
-                            
                             let data: &[u8] = v.get_data();
                             let data_ptr = data.as_ptr() as usize;
                             let bth_hdr = (data_ptr + EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN) as *const BthHdr;
@@ -122,10 +119,8 @@ impl Buffer {
                                 let seq_num = unsafe { (*bth_hdr).psn_seq };
                                 u32::from_be_bytes([0, seq_num[0], seq_num[1], seq_num[2]])
                             };
-                            
                             queue_ring.insert((dst_qp, seq_num), v);
                         }
-                        //warn!("added {} packets to queue, new queue size {}", pushed_packets, queue_ring.len());
                         rx_state.fq_deficit += n;
                     } else {
                         if rx_state.fq.needs_wakeup() {
@@ -137,7 +132,6 @@ impl Buffer {
                     panic!("error: {:?}", err);
                 }
             }
-            
             if queue_ring.len() > 0 {  
                 buffer_round += 1; 
                 let mut qp_list = Vec::new();
@@ -150,26 +144,16 @@ impl Buffer {
                     let mut k = 0;
                     let mut last_seq = None;
                     let mut buf: ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping> = ArrayDeque::new();
-                    //warn!("waiting for seq {}",seq);
-                    let mut round_send: usize = 0;
                     while let Some(v) = queue_ring.remove(&(dst_qpn, seq)){
-                        //warn!("got seq {}",seq);
                         seq += 1;
                         last_seq = Some((dst_qpn, seq));
                         k += 1;
                         buf.push_back(v);
                         if k % BATCH_SIZE == 0 {
-                            //warn!("XX sending {} packets", buf.len());
                             let p = send(tx, &mut buf).await;
-                            
-
-                            //warn!("sent 1 {} packets, round {}", p, buffer_round);
                             sent_counter += p;
-                            round_send += p;
                         }
                     }
-
-                    
                     if buf.len() > 0 {
                         let p = send(tx, &mut buf).await;
                         sent_counter += p;
@@ -179,24 +163,16 @@ impl Buffer {
                         next_seq_map.insert(dst_qpn, seq, 0)?;
                     }                
                 }
-                queued_packets = queue_ring.len();
-                //warn!("buffer counter {}", buffer_counter);
-                //warn!("sent counter {}", sent_counter);
             }
             
             if rx_state.fq_deficit >= FILL_THRESHOLD {
-                //warn!("deficit before fill {}", rx_state.fq_deficit);
                 let r = rx_state.fq.fill(&mut bufs, rx_state.fq_deficit);
                 match r {
                     Ok(n) => {
-                        if n > 0 {
-                            //warn!("filled {} packets", n);
-                        }
                         rx_state.fq_deficit -= n;
                     }
                     Err(err) => panic!("error: {:?}", err),
                 }
-                //warn!("deficit after fill {}", rx_state.fq_deficit);
             }
             
         }
