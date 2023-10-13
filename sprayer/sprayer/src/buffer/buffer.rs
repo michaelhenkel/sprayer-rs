@@ -1,5 +1,5 @@
 use aya::Bpf;
-use aya::maps::HashMap;
+use aya::maps::{HashMap, MapData};
 use common::BthHdr;
 use log::{info, warn};
 use arraydeque::{ArrayDeque, Wrapping};
@@ -80,16 +80,18 @@ impl Buffer {
         let mut buffer_counter = 0;
         let mut service_counter: usize = 0;
         let mut sent_counter: usize = 0;
+        let mut queue_ring_counter: usize = 0;
         let mut queued_packets = 0;
         let mut service_round: usize = 0;
         let mut buffer_round: usize = 0;
         let mut fill_ring_capacity = FILL_RING_SIZE as usize;
         let mut max_buff = 0;
+        let mut received_packet = 0;
         
         loop {
             
             let r = tx_state.cq.service(&mut bufs, BATCH_SIZE);
-            match r {
+            let serviced = match r {
                 Ok(n) => {
                     if n > 0 {
                         service_counter += n;
@@ -99,15 +101,18 @@ impl Buffer {
                         if max_buff < buffer_counter {
                             max_buff = buffer_counter;
                         }
-                        warn!("{} packets buffered. Max buffered packets {}. Fill deficit {}. Sent {}. Serviced {}.", buffer_counter, max_buff, rx_state.fq_deficit, sent_counter, n);
+                        warn!("{} packets received. {} packets buffered. Max buffered packets {}. Fill deficit {}. Sent {}. Serviced {}. Queue ring {}.",received_packet, buffer_counter, max_buff, rx_state.fq_deficit, sent_counter, n, queue_ring_counter);
                     }
+                    n
                 }
                 Err(err) => panic!("error: {:?}", err),
-            }
+            };
             sent_counter = 0;
+            received_packet = 0;
             match rx.try_recv(&mut rx_state.v, BATCH_SIZE, custom) {
                 Ok(n) => {
                     if n > 0 {
+                        received_packet = n;
                         fill_ring_capacity -= n;
                         buffer_counter += n;
                         while let Some(v) = rx_state.v.pop_front(){
@@ -132,14 +137,9 @@ impl Buffer {
                     panic!("error: {:?}", err);
                 }
             }
-            if queue_ring.len() > 0 {  
+            if queue_ring.len() > 0 && sent_counter == serviced{  
                 buffer_round += 1; 
-                let mut qp_list = Vec::new();
-                for res in next_seq_map.iter(){
-                    if let Ok((dst_qpn, seq)) = res {
-                        qp_list.push((dst_qpn, seq));
-                    }
-                }                
+                let mut qp_list = get_qp_list(&mut next_seq_map);
                 while let Some((dst_qpn, mut seq)) = qp_list.pop(){
                     let mut k = 0;
                     let mut last_seq = None;
@@ -163,9 +163,10 @@ impl Buffer {
                         next_seq_map.insert(dst_qpn, seq, 0)?;
                     }                
                 }
+                queue_ring_counter = queue_ring.len();
             }
             
-            if rx_state.fq_deficit >= FILL_THRESHOLD {
+            if rx_state.fq_deficit >= BATCH_SIZE {
                 let r = rx_state.fq.fill(&mut bufs, rx_state.fq_deficit);
                 match r {
                     Ok(n) => {
@@ -178,6 +179,16 @@ impl Buffer {
         }
         
     }
+}
+
+fn get_qp_list(next_seq_map: &mut HashMap<&mut MapData, [u8; 3], u32>) -> Vec<([u8; 3], u32)> {
+    let mut qp_list = Vec::new();
+    for res in next_seq_map.iter(){
+        if let Ok((dst_qpn, seq)) = res {
+            qp_list.push((dst_qpn, seq));
+        }
+    }
+    qp_list
 }
 
 async fn send<'a>(tx: &mut SocketTx<'a, BufCustom>, v: &mut ArrayDeque<[BufMmap<'a, BufCustom>; PENDING_LEN], Wrapping>) -> usize{

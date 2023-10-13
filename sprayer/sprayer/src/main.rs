@@ -1,66 +1,20 @@
 use anyhow::Context;
-use aya::maps::{HashMap, XskMap, MapData};
-use aya::programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags, ProgramFd,self};
-use aya::{include_bytes_aligned, Bpf, maps::Array, BpfLoader};
-use aya_bpf::cty::c_char;
+use aya::maps::{HashMap, XskMap};
+use aya::programs::{Xdp, XdpFlags};
+use aya::{include_bytes_aligned, Bpf, BpfLoader};
 use aya_log::BpfLogger;
 use clap::Parser;
 use log::{info, warn, debug};
 use tokio::signal;
-use common::{Interface, QpSeq};
+use common::{Interface, LinkCounter};
 
 use std::ffi::CString;
-use std::mem::zeroed;
 use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, AsFd};
-use std::os::raw::c_int;
 use std::io::{Error, ErrorKind};
-use nix::ifaddrs::{getifaddrs, InterfaceAddress};
+use nix::ifaddrs::getifaddrs;
 
 
-/*
-use xsk_rs::{RxQueue, TxQueue, FrameDesc};
-use xsk_rs::{
-    config::{SocketConfigBuilder, SocketConfig, UmemConfig, LibbpfFlags},
-    Socket, Umem
-};
-*/
-
-use rlimit::{setrlimit, Resource};
-use arraydeque::{ArrayDeque, Wrapping};
-use afxdp::mmap_area::{MmapArea, MmapAreaOptions};
-use afxdp::socket::{Socket, SocketOptions, SocketRx, SocketTx};
-use afxdp::umem::{Umem, UmemCompletionQueue, UmemFillQueue};
-use afxdp::PENDING_LEN;
-use afxdp::{buf::Buf, buf_pool::BufPool};
-use afxdp::{buf_mmap::BufMmap, buf_pool_vec::BufPoolVec};
-use libbpf_sys::{
-    XSK_RING_CONS__DEFAULT_NUM_DESCS,
-    XSK_RING_PROD__DEFAULT_NUM_DESCS,
-    xsk_socket__update_xskmap,
-    xsk_socket,
-    bpf_object__find_map_by_name,
-    bpf_object,
-    bpf_map__fd,
-    bpf_object__find_program_by_name,
-    bpf_object__find_map_fd_by_name,
-    bpf_prog_get_fd_by_id,
-    
-};
-use std::cmp::min;
-
-use buffer::buffer::Buffer;
-pub mod buffer;
-const BUF_NUM: usize = 65536;
-const BUF_LEN: usize = 4096;
-const BATCH_SIZE: usize = 64;
-struct XDPWorker<'a> {
-    core: usize,
-    rx: SocketRx<'a, BufCustom>,
-    tx: SocketTx<'a, BufCustom>,
-    cq: UmemCompletionQueue<'a, BufCustom>,
-    fq: UmemFillQueue<'a, BufCustom>,
-}
 
 #[derive(Default, Copy, Clone)]
 struct BufCustom {}
@@ -70,14 +24,7 @@ struct BufCustom {}
 enum Mode{
     EncapDecap,
     Dummy,
-}
-
-struct State<'a> {
-    cq: UmemCompletionQueue<'a, BufCustom>,
-    fq: UmemFillQueue<'a, BufCustom>,
-    rx: SocketRx<'a, BufCustom>,
-    tx: SocketTx<'a, BufCustom>,
-    fq_deficit: usize,
+    Disco,
 }
 
 #[derive(Debug, Parser)]
@@ -92,26 +39,32 @@ struct Opt {
     dummy: Option<String>,
     #[clap(short, long)]
     buffer: Option<bool>,
+    #[clap(short, long)]
+    factor: Option<u8>,
+    #[clap(short, long)]
+    disco: Option<Vec<String>>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
 
-    if (opt.encap.is_some() && opt.decap.is_none() || (opt.encap.is_none() && opt.decap.is_some())){
+    if opt.encap.is_some() && opt.decap.is_none() || (opt.encap.is_none() && opt.decap.is_some()){
         panic!("encap and decap must be defined");
     }
 
-    if opt.dummy.is_some() && (opt.decap.is_some() || opt.encap.is_some()){
+    if opt.dummy.is_some() && (opt.decap.is_some() || opt.encap.is_some() || opt.disco.is_some()){
         panic!("dummy cannot be defined with encap or decap");
+    }
+
+    if opt.disco.is_some() && (opt.decap.is_some() || opt.encap.is_some() || opt.dummy.is_some()){
+        panic!("disco cannot be defined with encap or decap");
     }
 
     let buffer = match opt.buffer{
         Some(buffer) => { buffer },
         None => { true }
     };
-
-
 
     env_logger::init();
 
@@ -126,10 +79,6 @@ async fn main() -> Result<(), anyhow::Error> {
         debug!("remove limit on locked memory failed, ret is: {}", ret);
     }
 
-    //#[cfg(debug_assertions)]
-    //let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
-    //    "/tmp/lima/bpfel-unknown-none/debug/xdp-encap"
-    //))?;
     #[cfg(not(debug_assertions))]
     info!("load encap release");
     let mut xdp_encap_bpf = Bpf::load(include_bytes_aligned!(
@@ -169,9 +118,15 @@ async fn main() -> Result<(), anyhow::Error> {
     //    "/tmp/lima/bpfel-unknown-none/debug/xdp-dummy"
     //))?;
     #[cfg(not(debug_assertions))]
-    info!("load release");
+    info!("load dummy release");
     let mut xdp_dummy_bpf = Bpf::load(include_bytes_aligned!(
         "../../target/bpfel-unknown-none/release/xdp-dummy"
+    ))?;
+
+    #[cfg(not(debug_assertions))]
+    info!("load peer disco release");
+    let mut xdp_peer_disco_bpf = Bpf::load(include_bytes_aligned!(
+        "../../target/bpfel-unknown-none/release/xdp-peer-disco"
     ))?;
 
     let res = if opt.decap.is_some() && opt.encap.is_some() {
@@ -249,6 +204,15 @@ async fn main() -> Result<(), anyhow::Error> {
             warn!("encap buf map not found");
         }
 
+        if let Some(factor) = opt.factor{
+            if let Some(link_counter_map) = xdp_encap_bpf.map_mut("LINKCOUNTER"){
+                let mut link_counter_map: HashMap<_, u8, LinkCounter> = HashMap::try_from(link_counter_map)?;
+                link_counter_map.insert(&0, &LinkCounter{links: factor,counter: 0}, 0)?;
+            } else {
+                warn!("LINKCOUNTER map not found");
+            }
+        }
+
         if let Some(counter_map) = xdp_encap_bpf.map_mut("COUNTER"){
             let mut counter_map: HashMap<_, u8, u8> = HashMap::try_from(counter_map)?;
             counter_map.insert(&0, &0, 0)?;
@@ -277,6 +241,15 @@ async fn main() -> Result<(), anyhow::Error> {
             warn!("ENCAPINTERFACE map not found");
         }
 
+        if let Some(factor) = opt.factor{
+            if let Some(link_counter_map) = xdp_decap_bpf.map_mut("LINKCOUNTER"){
+                let mut link_counter_map: HashMap<_, u8, LinkCounter> = HashMap::try_from(link_counter_map)?;
+                link_counter_map.insert(&0, &LinkCounter{links: factor,counter: 0}, 0)?;
+            } else {
+                warn!("LINKCOUNTER map not found");
+            }
+        }
+
         if let Some(buf_map) = xdp_decap_bpf.map_mut("BUFFER"){
             let mut buf_map: HashMap<_, u8, u8> = HashMap::try_from(buf_map)?;
             if buffer{
@@ -303,7 +276,7 @@ async fn main() -> Result<(), anyhow::Error> {
         } else {
             panic!("EGRESSXSKMAP map not found");
         };
-
+        /*
         let mut buf = Buffer::new(decap_intf.clone(), encap_intf.clone(), ingress_map_fd, egress_map_fd, xdp_decap_bpf, xdp_encap_bpf);
 
         match buf.run().await{
@@ -312,6 +285,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 panic!("error: {:?}", e);
             }
         }
+        */
 
 
     } else if opt.dummy.is_some() {
@@ -325,6 +299,8 @@ async fn main() -> Result<(), anyhow::Error> {
         xdp_program.attach(&dummy_intf, XdpFlags::DRV_MODE)
             .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
         //dummy(dummy_intf)?
+    } else if opt.disco.is_some(){
+        let disco_interfaces = opt.disco.unwrap();
     } else {
         panic!("encap and decap or dummy must be defined");
     };

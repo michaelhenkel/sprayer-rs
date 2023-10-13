@@ -46,6 +46,7 @@ pub fn build_ebpf(opts: Options) -> Result<(), anyhow::Error> {
     let xdp_encap_dir = PathBuf::from("xdp-encap-ebpf");
     let xdp_decap_dir = PathBuf::from("xdp-decap-ebpf");
     let xdp_dummy_dir = PathBuf::from("xdp-dummy-ebpf");
+    let xdp_peer_disco_dir = PathBuf::from("xdp-peer-disco-ebpf");
 
     let target = format!("--target={}", opts.target);
     let mut args = vec![
@@ -104,6 +105,14 @@ pub fn build_ebpf(opts: Options) -> Result<(), anyhow::Error> {
         .status()
         .expect("failed to build xdp dummy bpf program");
     assert!(xdp_dummy_status.success());
+
+    let xdp_peer_disco_status = Command::new("cargo")
+        .current_dir(xdp_peer_disco_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .args(&args)
+        .status()
+        .expect("failed to build xdp peer disco bpf program");
+    assert!(xdp_peer_disco_status.success());
     
     Ok(())
 }

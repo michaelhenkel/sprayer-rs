@@ -41,6 +41,8 @@ struct Opt {
     qpid: Option<u32>,
     #[clap(short, long, default_value = "100")]
     start: Option<u32>,
+    #[clap(long, default_value = "512")]
+    packet_size: usize,
 }
 
 fn read_yaml_file(file_path: &str) -> Result<Vec<Message>, anyhow::Error> {
@@ -81,7 +83,7 @@ impl From<Message> for BthSeq{
         let mut bth_seq = BthSeq::new([qp_id[1], qp_id[2], qp_id[3]]);
         for sequence in message.sequence{
             if sequence.last{
-                println!("last sequence: {:?}", sequence);
+                info!("last sequence: {}", sequence.id);
             }
             bth_seq.add_msg(sequence.sequence_type, sequence.id, sequence.last);
         }
@@ -132,8 +134,7 @@ enum BthSeqType{
     Last,
 }
 
-fn get_messages(messages: u32, packets: u32, qpid: u32, start: u32) -> Vec<Message>{
-    let mut msgs = Vec::new();
+async fn send_messages(sock: &UdpSocket, messages: u32, packets: u32, qpid: u32, start: u32, packet_size: usize) -> anyhow::Result<()>{
     let mut seq_counter = start;
     let tot_seq = messages * packets;
     let mut num_seq_counter = 0;
@@ -155,25 +156,42 @@ fn get_messages(messages: u32, packets: u32, qpid: u32, start: u32) -> Vec<Messa
             });
             seq_counter += 1;
         }
-        msgs.push(Message{
+        let msg = Message{
             qp_id: qpid,
             sequence,
-        });
+        };
+        let bth_seq = BthSeq::from(msg);
+        for bth_hdr in bth_seq.messages{
+            let buf = unsafe {
+                let ptr = &bth_hdr as *const BthHdr as *const u8;
+                std::slice::from_raw_parts(ptr, std::mem::size_of::<BthHdr>())
+            };
+            let mut b = Vec::from(buf);
+            let c = Vec::with_capacity(packet_size);
+            let c = c.as_slice();
+            b.extend_from_slice(c);
+            let b = b.as_slice();
+            let _len = sock.send(b).await?;
+        }
     }
-    msgs
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()>{
     let opt = Opt::parse();
     let ip = get_ip_address_from_interface(&opt.iface)?;
-    let ip_port = format!("{}:{}", ip.to_string(), random_src_port());    
+    let ip_port = format!("{}:{}", ip.to_string(), random_src_port());  
+    let packet_size = opt.packet_size;  
     let sock = UdpSocket::bind(ip_port).await?;
     let remote_addr = opt.dst.parse::<SocketAddr>()?;
     sock.connect(remote_addr).await?;
-    let messages = if opt.messages.is_some() && opt.packets.is_some() && opt.qpid.is_some() && opt.start.is_some(){
-        get_messages(opt.messages.unwrap(), opt.packets.unwrap(), opt.qpid.unwrap(), opt.start.unwrap())
-    } else if let Some(config) = opt.config{
+    if opt.messages.is_some() && opt.packets.is_some() && opt.qpid.is_some() && opt.start.is_some(){
+        send_messages(&sock, opt.messages.unwrap(), opt.packets.unwrap(), opt.qpid.unwrap(), opt.start.unwrap(), packet_size).await?;
+        return Ok(());
+    }
+
+    let messages = if let Some(config) = opt.config{
         read_yaml_file(&config)?
     } else {
         panic!("either config or messages, packets, qpid, and start must be specified");
@@ -186,11 +204,8 @@ async fn main() -> anyhow::Result<()>{
                 let ptr = &bth_hdr as *const BthHdr as *const u8;
                 std::slice::from_raw_parts(ptr, std::mem::size_of::<BthHdr>())
             };
-            //println!("Sending BTH header: {:?}", bth_hdr);
             let mut b = Vec::from(buf);
-            let data = String::from("hello");
-            let data_bytes = data.as_bytes();
-            let c = vec![0;1024];
+            let c = Vec::with_capacity(packet_size);
             let c = c.as_slice();
             b.extend_from_slice(c);
             let b = b.as_slice();

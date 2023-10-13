@@ -183,6 +183,15 @@ impl Bth {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct LinkCounter{
+    pub links: u8,
+    pub counter: u8,
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for LinkCounter {}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct QpSeq{
     pub dst_qpn: u32,
     pub seq: u32,

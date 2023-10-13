@@ -30,6 +30,7 @@ use common::{
     SrcDst,
     BthHdr,
     XskMap,
+    LinkCounter
 };
 
 #[map(name = "ENCAPINTERFACE")]
@@ -55,6 +56,10 @@ static mut LASTCOUNTER: HashMap<[u8;3], [u8;3]> =
 #[map(name = "INGRESSXSKMAP")]
 static mut XSKMAP: XskMap<u32, u32> =
     XskMap::<u32, u32>::with_max_entries(64, 0);
+
+#[map(name = "LINKCOUNTER")]
+static mut LINKCOUNTER: HashMap<u8, LinkCounter> =
+    HashMap::<u8, LinkCounter>::with_max_entries(1, 0);
 
 enum Action{
     BUFFER,
@@ -154,7 +159,12 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface, buf: bool) -> Result<u3
     let dst_qp_list = unsafe { (*bth_hdr_ptr).dest_qpn };
     let op_code = u8::from_be(unsafe { (*bth_hdr_ptr).opcode });
     let udp_source_port = u16::from_be(unsafe { (*udp_hdr_ptr).source } );
-    let orig_udp_src_port = unmask(udp_source_port, psn_seq);
+    //let orig_udp_src_port = unmask(udp_source_port, psn_seq);
+    let orig_udp_src_port = if let Some(link_counter_ptr) =  unsafe { LINKCOUNTER.get_ptr_mut(&0) }{
+        mask2(udp_source_port, psn_seq, link_counter_ptr)
+    } else {
+        unmask(udp_source_port, psn_seq)
+    };
 
     unsafe { (*udp_hdr_ptr).source = u16::to_be(orig_udp_src_port); }
 
@@ -173,7 +183,7 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface, buf: bool) -> Result<u3
         (*udp_hdr_ptr).check = 0;
     };
 
-    let action = if buf {
+    let mut action = if buf {
         //warn!(&ctx, "got psn_seq: {}", psn_seq);
         if op_code == 17 {
             Action::REDIRECT
@@ -191,6 +201,7 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface, buf: bool) -> Result<u3
             Action::REDIRECT
         } else if let Some(next_seq) = unsafe { NEXTSEQ.get(&dst_qp_list) }{
             if *next_seq == psn_seq {
+                /*
                 if op_code == 2 {
                     if let Some(last_counter) = unsafe { LASTCOUNTER.get_ptr_mut(&dst_qp_list)}{
                         let last_counter_list = unsafe { *last_counter };
@@ -212,6 +223,7 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface, buf: bool) -> Result<u3
                         };
                     }
                 }
+                */
                 match unsafe { NEXTSEQ.insert(&dst_qp_list, &(psn_seq + 1), 0)}{
                     Ok(_) => {}
                     Err(_) => {
@@ -232,7 +244,7 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface, buf: bool) -> Result<u3
     } else {
         Action::REDIRECT
     };
-    //action = Action::BUFFER;
+    action = Action::REDIRECT;
 
     let res = match action {
         Action::REDIRECT => {
@@ -246,6 +258,19 @@ fn try_xdp_decap(ctx: XdpContext, encap_intf: Interface, buf: bool) -> Result<u3
     };
 
     Ok(res)
+}
+
+#[inline(always)]
+fn mask2(unmasked_port: u16, seq: u32, link_counter: *mut LinkCounter) -> u16 {
+    unsafe {
+        if seq % (*link_counter).links as u32 == 0{
+            (*link_counter).counter = 0;
+        } else {
+            (*link_counter).counter += 1;
+        }
+        let reduced_seq = seq - (*link_counter).counter as u32;
+        unmasked_port ^ reduced_seq as u16
+    }
 }
 
 #[inline(always)]

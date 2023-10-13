@@ -23,7 +23,7 @@ use common::{
     SrcDst,
     BthHdr,
     XskMap,
-    SprayerHdr,
+    LinkCounter,
 };
 
 #[map(name = "LINKS")]
@@ -77,6 +77,10 @@ static mut FIRSTCOUNTER: HashMap<[u8;3], [u8;3]> =
 #[map(name = "LASTCOUNTER")]
 static mut LASTCOUNTER: HashMap<[u8;3], [u8;3]> =
     HashMap::<[u8;3], [u8;3]>::with_max_entries(2048, 0);
+
+#[map(name = "LINKCOUNTER")]
+static mut LINKCOUNTER: HashMap<u8, LinkCounter> =
+    HashMap::<u8, LinkCounter>::with_max_entries(1, 0);
 
 #[xdp]
 pub fn xdp_encap(ctx: XdpContext) -> u32 {
@@ -138,8 +142,11 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, buf: bool) -> Result<u3
     let dst_qp_list = unsafe { (*bth_hdr_ptr).dest_qpn };
     let op_code = u8::from_be(unsafe { (*bth_hdr_ptr).opcode });
     let udp_src_port = u16::from_be(unsafe { (*udp_hdr_ptr).source });
-    let new_udp_src_port = mask(udp_src_port, psn_seq);
-
+    let new_udp_src_port = if let Some(link_counter_ptr) =  unsafe { LINKCOUNTER.get_ptr_mut(&0) }{
+        mask2(udp_src_port, psn_seq, link_counter_ptr)
+    } else {
+        mask(udp_src_port, psn_seq)
+    };
     unsafe {
         (*eth_hdr_ptr).src_addr = flow_next_hop.src_mac;
         (*eth_hdr_ptr).dst_addr = flow_next_hop.dst_mac;
@@ -164,7 +171,9 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, buf: bool) -> Result<u3
                 unsafe { FIRSTCOUNTER.insert(&dst_qp_list, &fc_list, 0) }.map_err(|_| xdp_action::XDP_ABORTED)?;
                 unsafe { (*bth_hdr_ptr).res = u8::to_be(1) };
             }
-        } else if op_code == 2{
+        } 
+        /*
+        else if op_code == 2{
             if let Some(last_counter) = unsafe { LASTCOUNTER.get_ptr_mut(&dst_qp_list) }{
                 let last_counter_list = unsafe { *last_counter };
                 let mut fc: u32 = u32::from_be_bytes([0, last_counter_list[0], last_counter_list[1], last_counter_list[2]]);
@@ -179,6 +188,7 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, buf: bool) -> Result<u3
                 unsafe { LASTCOUNTER.insert(&dst_qp_list, &fc_list, 0) }.map_err(|_| xdp_action::XDP_ABORTED)?;
             }
         }
+        */
         if op_code == 0 || op_code == 1 || op_code == 2 {
             if let Some(next_seq) = unsafe { NEXTSEQ.get_ptr_mut(&dst_qp_list) }{
                 unsafe { *next_seq = psn_seq + 1 };
@@ -195,6 +205,19 @@ fn try_xdp_encap(ctx: XdpContext, decap_intf: Interface, buf: bool) -> Result<u3
 #[inline(always)]
 fn mask(port: u16, num: u32) -> u16 {
     port ^ num as u16
+}
+
+#[inline(always)]
+fn mask2(unmasked_port: u16, seq: u32, link_counter: *mut LinkCounter) -> u16 {
+    unsafe {
+        if seq % (*link_counter).links as u32 == 0{
+            (*link_counter).counter = 0;
+        } else {
+            (*link_counter).counter += 1;
+        }
+        let reduced_seq = seq - (*link_counter).counter as u32;
+        unmasked_port ^ reduced_seq as u16
+    }
 }
 
 #[inline(always)]
