@@ -1,5 +1,5 @@
 .PHONY: sprayer  server client cli_client cli_server
-ARCH?=aarch64
+ARCH?=x86_64
 all: sprayer server client cli_client cli_server
 sprayer: ebpf
 	(cd sprayer; cargo build --release --target=${ARCH}-unknown-linux-gnu)
