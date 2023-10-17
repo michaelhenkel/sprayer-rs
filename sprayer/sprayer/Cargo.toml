@@ -27,6 +27,12 @@ core_affinity = "0.5"
 rlimit = "0.10.1"
 network-types = "0.0.4"
 futures = "0.3.28"
+pnet = "0.34.0"
+tonic = "0.10"
+prost = "0.12"
+
+[build-dependencies]
+tonic-build = "0.10"
 
 [[bin]]
 name = "sprayer"

@@ -9,12 +9,14 @@ use std::collections::{HashSet, HashMap};
 use std::{io, mem};
 use std::os::fd::AsRawFd;
 use clap::Parser;
-use common::BthHdr;
+use common::{BthHdr, CtrlSequence};
 
 #[derive(Debug, Parser)]
 struct Opt {
     #[clap(short, long, default_value = "4791")]
     port: u16,
+    #[clap(short, long, default_value = "4792")]
+    ctrl_port: u16,
     #[clap(short, long, default_value = "lima1")]
     iface: String,
     #[clap(short, long, default_value = "512")]
@@ -54,9 +56,11 @@ async fn main() {
     let ip = get_get_ip_address_from_interface(&opt.iface).unwrap();
     println!("Starting server on portx {}:{}", ip, opt.port);
     let (tx, rx) = tokio::sync::mpsc::channel(100000);
+    let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel(1);
     let wait = vec![
-        tokio::spawn(handle_packet(rx)),
-        tokio::spawn(run_udp_server(opt.port, ip.to_string(), tx, packet_size)),
+        tokio::spawn(handle_packet(rx, ctrl_tx)),
+        tokio::spawn(run_data_udp_server(opt.port, ip.to_string(), tx, packet_size)),
+        tokio::spawn(run_ctrl_udp_server(opt.ctrl_port, ip.to_string(), ctrl_rx, packet_size)),
     ];
     for t in wait {
         t.await.expect("server failed").unwrap();
@@ -64,22 +68,24 @@ async fn main() {
     
 }
 
-async fn run_udp_server(port: u16, ip: String, tx: tokio::sync::mpsc::Sender<(Vec<u8>, usize)>, packet_size: usize) -> io::Result<()> {
+async fn run_data_udp_server(port: u16, ip: String, tx: tokio::sync::mpsc::Sender<(Vec<u8>, usize)>, packet_size: usize) -> io::Result<()> {
     
     let bindaddr = format!("{}:{}", ip, port);
     let sock = UdpSocket::bind(&bindaddr).await?;
     socket::setsockopt(&sock, RcvBuf, &(65535*1000)).unwrap();
-    let mut v: Vec<u8> = Vec::with_capacity(packet_size);
-    //let mut s = v.as_mut_slice();
     let mut b = [0u8; 1024];
     println!("listening on {}", bindaddr);
+
     loop {
         match sock.try_recv(&mut b){
             Ok(n) => {
+                unsafe { GLOBAL_COUNTER += 1 };
+                /* 
                 let v = b.to_vec();
                 if let Err(e) = tx.send((v, n)).await{
                     println!("error sending to handler: {}", e);
                 }
+                */
             },
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 continue;
@@ -93,7 +99,45 @@ async fn run_udp_server(port: u16, ip: String, tx: tokio::sync::mpsc::Sender<(Ve
     Ok(())
 }
 
-async fn handle_packet(mut rx: tokio::sync::mpsc::Receiver<(Vec<u8>, usize)>) -> io::Result<()> {
+//global_counter is a global variable
+static mut GLOBAL_COUNTER: i32 = 0;
+
+async fn run_ctrl_udp_server(port: u16, ip: String, rx: tokio::sync::mpsc::Receiver<usize>, packet_size: usize) -> io::Result<()> {
+    
+    let bindaddr = format!("{}:{}", ip, port);
+    let sock = UdpSocket::bind(&bindaddr).await?;
+    let mut b = [0u8; 1024];
+    println!("listening on {}", bindaddr);
+    loop {
+        match sock.try_recv(&mut b){
+            Ok(n) => {
+                let v = b.to_vec();
+                let ctrl_seq: *const CtrlSequence = &v[..n] as *const _ as *const CtrlSequence; 
+                let ctrl_seq: CtrlSequence = unsafe { *ctrl_seq };
+                match ctrl_seq.start_end{
+                    0 => {
+                        println!("start, expecting {} packets", ctrl_seq.num_packet);
+                        println!("global counter {}", unsafe { GLOBAL_COUNTER });
+                        unsafe { GLOBAL_COUNTER = 0 };
+                    },
+                    1 => {
+                        println!("end");
+                    },
+                    _ => {},
+                }
+            },
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                continue;
+            }
+            Err(e) => {
+                return Err(e);
+            }
+
+        }
+    }
+}
+
+async fn handle_packet(mut rx: tokio::sync::mpsc::Receiver<(Vec<u8>, usize)>, mut tx: tokio::sync::mpsc::Sender<usize>) -> io::Result<()> {
     println!("starting packet handler");
     let mut prev_seq = 0;
     let mut packets = 0;

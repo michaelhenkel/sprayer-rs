@@ -18,12 +18,20 @@ use network_types::{
 use core::mem::{self, MaybeUninit};
 use core::mem::{size_of, zeroed};
 
-use common::{Interface, FlowKey, FlowNextHop, SrcDst};
+use common::{Interface, FlowKey, FlowNextHop, SrcDst, XskMap, Stats};
 
 
 #[map(name = "FLOWTABLE")]
 static mut FLOWTABLE: HashMap<FlowKey, FlowNextHop> =
     HashMap::<FlowKey, FlowNextHop>::with_max_entries(256, 0);
+
+#[map(name = "INGRESSXSKMAP")]
+static mut XSKMAP: XskMap<u32, u32> =
+    XskMap::<u32, u32>::with_max_entries(64, 0);
+
+#[map(name = "STATSMAP")]
+static mut STATSMAP: HashMap<u32, Stats> =
+    HashMap::<u32, Stats>::with_max_entries(2048, 0);
 
 #[xdp]
 pub fn xdp_peer_disco(ctx: XdpContext) -> u32 {
@@ -37,7 +45,7 @@ pub fn xdp_peer_disco(ctx: XdpContext) -> u32 {
 
 fn try_xdp_peer_disco(ctx: XdpContext) -> Result<u32, u32> {
     ////info!(&ctx, "xdp_dummy");
-    /*
+    
     let eth_hdr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_PASS)?;
     match unsafe { (*eth_hdr).ether_type } {
         EtherType::Ipv4 => {},
@@ -47,28 +55,29 @@ fn try_xdp_peer_disco(ctx: XdpContext) -> Result<u32, u32> {
     }
     let ipv4_hdr = ptr_at_mut::<Ipv4Hdr>(&ctx, EthHdr::LEN).ok_or(xdp_action::XDP_PASS)?;
     match  unsafe { (*ipv4_hdr).proto } {
-        IpProto::Tcp => {},
         IpProto::Udp => {},
         _ => {
             return Ok(xdp_action::XDP_PASS);
         }
     }
-    let flow_next_hop = if let Some(flow_next_hop) = get_v4_next_hop_from_flow_table(&ctx){
-        flow_next_hop
-    } else if let Some(flow_next_hop) = get_next_hop(&ctx) {
-        flow_next_hop
-    } else {
-        return Ok(xdp_action::XDP_PASS);
-    };
+    let udp_hdr = ptr_at_mut::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(xdp_action::XDP_PASS)?;
 
-    unsafe { (*eth_hdr).dst_addr = flow_next_hop.dst_mac };
-    unsafe { (*eth_hdr).src_addr = flow_next_hop.src_mac };
+    match unsafe { (*udp_hdr).dest }{
+        4791 => {
+            if let Some(stats) = unsafe { STATSMAP.get_ptr_mut(&0)} {
+                unsafe { (*stats).tx += 1};
+                return Ok(xdp_action::XDP_DROP)
+            }
+        },
+        4792 => {
+            unsafe { STATSMAP.insert(&0, &Stats { tx: 0 }, 0)}.map_err(|_| xdp_action::XDP_ABORTED)?;
+        },
+        _ => {
+            return Ok(xdp_action::XDP_PASS);
+        }
+    }
 
-    let res = unsafe { bpf_redirect(flow_next_hop.ifidx, 0) };
-    ////info!(&ctx, "redirect res: {} to ifidx {}", res, flow_next_hop.ifidx);
-    Ok(res as u32)
-    */
-    Ok(xdp_action::XDP_PASS)
+    Ok(xdp_action::XDP_DROP)
 }
 
 #[inline(always)]

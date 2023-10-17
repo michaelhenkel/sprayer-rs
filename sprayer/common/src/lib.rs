@@ -119,6 +119,15 @@ unsafe impl aya::Pod for FlowKey {}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct Stats {
+    pub tx: u32,
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for Stats {}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct FlowNextHop {
     pub src_mac: [u8;6],
     pub dst_mac: [u8;6],
@@ -179,6 +188,15 @@ pub struct Bth {
 }
 impl Bth {
     pub const LEN: usize = mem::size_of::<Bth>();
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CtrlSequence{
+    pub num_packet: u32,
+    pub first: u32,
+    pub last: u32,
+    pub qp_id: u32,
+    pub start_end: u8,
 }
 
 #[repr(C)]

@@ -5,5 +5,7 @@ members = [
     "sprayer/sprayer",
     "server",
     "client",
+    "cli_client",
+    "cli_server",
 ]
 resolver = "2"

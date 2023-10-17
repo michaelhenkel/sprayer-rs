@@ -2,7 +2,7 @@ use rand::seq;
 use tokio::net::UdpSocket;
 use std::net::SocketAddr;
 use clap::Parser;
-use common::BthHdr;
+use common::{BthHdr, CtrlSequence};
 use log::info;
 use serde::{Deserialize, Serialize};
 use serde_yaml;
@@ -16,6 +16,7 @@ struct Sequence {
     sequence_type: BthSeqType,
     id: u32,
     last: bool,
+    pre: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -27,8 +28,12 @@ struct Message {
 
 #[derive(Debug, Parser)]
 struct Opt {
-    #[clap(short, long, default_value = "192.168.1.102:4791")]
+    #[clap(short, long, default_value = "192.168.1.102")]
     dst: String,
+    #[clap(long, default_value = "4791")]
+    port: String,
+    #[clap(long, default_value = "4792")]
+    ctrl: String,
     #[clap(short, long, default_value = "lima1")]
     iface: String,
     #[clap(short, long, default_value = "config.yaml")]
@@ -82,10 +87,7 @@ impl From<Message> for BthSeq{
         let qp_id = qp_id.to_le_bytes();
         let mut bth_seq = BthSeq::new([qp_id[1], qp_id[2], qp_id[3]]);
         for sequence in message.sequence{
-            if sequence.last{
-                info!("last sequence: {}", sequence.id);
-            }
-            bth_seq.add_msg(sequence.sequence_type, sequence.id, sequence.last);
+            bth_seq.add_msg(sequence.sequence_type, sequence.id, sequence.last, sequence.pre);
         }
         bth_seq
     }
@@ -98,7 +100,7 @@ impl BthSeq{
             qp_id,
         }
     }
-    fn add_msg(&mut self, bth_seq_type: BthSeqType, seq: u32, last: bool){
+    fn add_msg(&mut self, bth_seq_type: BthSeqType, seq: u32, last: bool, pre: bool){
         let seq = u32::to_be(seq);
         let seq = seq.to_le_bytes();
         let mut bth_hdr = BthHdr{
@@ -134,6 +136,28 @@ enum BthSeqType{
     Last,
 }
 
+async fn send_ctrl(sock: &UdpSocket, messages: u32, packets: u32, qpid: u32, start: u32, packet_size: usize, start_end: u8) -> anyhow::Result<()>{
+    let pre_sequence = CtrlSequence{
+        num_packet: messages * packets,
+        first: start,
+        last: start + messages * packets - 1,
+        qp_id: qpid,
+        start_end,
+    };
+    let buf = unsafe {
+        let ptr = &pre_sequence as *const CtrlSequence as *const u8;
+        std::slice::from_raw_parts(ptr, std::mem::size_of::<BthHdr>())
+    };
+    let mut b = Vec::from(buf);
+    let c = Vec::with_capacity(packet_size);
+    let c = c.as_slice();
+    b.extend_from_slice(c);
+    let b = b.as_slice();
+    let _len = sock.send(b).await?;
+    Ok(())
+
+}
+
 async fn send_messages(sock: &UdpSocket, messages: u32, packets: u32, qpid: u32, start: u32, packet_size: usize) -> anyhow::Result<()>{
     let mut seq_counter = start;
     let tot_seq = messages * packets;
@@ -153,6 +177,7 @@ async fn send_messages(sock: &UdpSocket, messages: u32, packets: u32, qpid: u32,
                 sequence_type,
                 id: seq_counter,
                 last: tot_seq == num_seq_counter,
+                pre: false,
             });
             seq_counter += 1;
         }
@@ -181,13 +206,24 @@ async fn send_messages(sock: &UdpSocket, messages: u32, packets: u32, qpid: u32,
 async fn main() -> anyhow::Result<()>{
     let opt = Opt::parse();
     let ip = get_ip_address_from_interface(&opt.iface)?;
-    let ip_port = format!("{}:{}", ip.to_string(), random_src_port());  
+    let data_ip_port = format!("{}:{}", ip.to_string(), random_src_port());  
+    let ctrl_ip_port = format!("{}:{}", ip.to_string(), random_src_port());
     let packet_size = opt.packet_size;  
-    let sock = UdpSocket::bind(ip_port).await?;
-    let remote_addr = opt.dst.parse::<SocketAddr>()?;
-    sock.connect(remote_addr).await?;
+    let data_sock = UdpSocket::bind(data_ip_port).await?;
+    let ctrl_sock = UdpSocket::bind(ctrl_ip_port).await?;
+    let data_addr = format!("{}:{}", opt.dst, opt.port);
+    let ctrl_addr = format!("{}:{}", opt.dst, opt.ctrl);
+    let remote_data_addr = data_addr.parse::<SocketAddr>()?;
+    let remote_ctrl_addr = ctrl_addr.parse::<SocketAddr>()?;
+    ctrl_sock.connect(remote_ctrl_addr).await?;
+    data_sock.connect(remote_data_addr).await?;
     if opt.messages.is_some() && opt.packets.is_some() && opt.qpid.is_some() && opt.start.is_some(){
-        send_messages(&sock, opt.messages.unwrap(), opt.packets.unwrap(), opt.qpid.unwrap(), opt.start.unwrap(), packet_size).await?;
+        send_ctrl(&ctrl_sock, opt.messages.unwrap(), opt.packets.unwrap(), opt.qpid.unwrap(), opt.start.unwrap(), packet_size, 0).await?;
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        send_messages(&data_sock, opt.messages.unwrap(), opt.packets.unwrap(), opt.qpid.unwrap(), opt.start.unwrap(), packet_size).await?;
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        send_ctrl(&ctrl_sock, opt.messages.unwrap(), opt.packets.unwrap(), opt.qpid.unwrap(), opt.start.unwrap(), packet_size, 1).await?;
+
         return Ok(());
     }
 
@@ -209,7 +245,7 @@ async fn main() -> anyhow::Result<()>{
             let c = c.as_slice();
             b.extend_from_slice(c);
             let b = b.as_slice();
-            let _len = sock.send(b).await?;
+            let _len = data_sock.send(b).await?;
         }
     }
     Ok(())

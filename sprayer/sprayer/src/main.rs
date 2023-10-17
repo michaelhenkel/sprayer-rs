@@ -13,6 +13,10 @@ use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, AsFd};
 use std::io::{Error, ErrorKind};
 use nix::ifaddrs::getifaddrs;
+pub mod buffer;
+pub mod disco;
+use crate::buffer::buffer::Buffer;
+use crate::disco::disco::PeerDisco;
 
 
 
@@ -276,7 +280,7 @@ async fn main() -> Result<(), anyhow::Error> {
         } else {
             panic!("EGRESSXSKMAP map not found");
         };
-        /*
+        
         let mut buf = Buffer::new(decap_intf.clone(), encap_intf.clone(), ingress_map_fd, egress_map_fd, xdp_decap_bpf, xdp_encap_bpf);
 
         match buf.run().await{
@@ -285,7 +289,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 panic!("error: {:?}", e);
             }
         }
-        */
+    
 
 
     } else if opt.dummy.is_some() {
@@ -298,9 +302,32 @@ async fn main() -> Result<(), anyhow::Error> {
         xdp_program.load()?;
         xdp_program.attach(&dummy_intf, XdpFlags::DRV_MODE)
             .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
-        //dummy(dummy_intf)?
     } else if opt.disco.is_some(){
+        if let Err(e) = BpfLogger::init(&mut xdp_peer_disco_bpf) {
+            // This can happen if you remove all log statements from your eBPF program.
+            warn!("failed to initialize eBPF logger: {}", e);
+        }
         let disco_interfaces = opt.disco.unwrap();
+        for disco_interface in &disco_interfaces{
+            let xdp_program: &mut Xdp = xdp_peer_disco_bpf.program_mut("xdp_peer_disco").unwrap().try_into()?;
+            xdp_program.load()?;
+            xdp_program.attach(disco_interface, XdpFlags::DRV_MODE)
+                .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::DRV_MODE")?;
+        }
+        let ingress_map_fd = if let Some(xsk_map) = xdp_peer_disco_bpf.map_mut("INGRESSXSKMAP") {
+            let xsk_map = XskMap::<_, u32, u32>::try_from(xsk_map)?;
+            xsk_map.fd().unwrap().as_fd().as_raw_fd()    
+        } else {
+            panic!("INGRESSXSKMAP map not found");
+        };
+
+        let mut disco = PeerDisco::new(disco_interfaces, 3, ingress_map_fd);
+        match disco.run(xdp_peer_disco_bpf).await{
+            Ok(_) => {},
+            Err(e) => {
+                panic!("error: {:?}", e);
+            }
+        }
     } else {
         panic!("encap and decap or dummy must be defined");
     };

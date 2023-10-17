@@ -1,0 +1,15 @@
+syntax = "proto3";
+package cli_server;
+
+service Stats {
+    rpc Get (StatsRequest) returns (StatsReply);
+    rpc Reset (StatsRequest) returns (StatsReply)
+}
+
+message StatsRequest {
+    string name = 1;
+}
+
+message StatsReply {
+    string message = 1;
+}

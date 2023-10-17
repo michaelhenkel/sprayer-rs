@@ -126,3 +126,18 @@ tc qdisc add dev r1_link3 root netem delay 3ms
 tc qdisc del dev r1_link1 root netem
 tc qdisc del dev r1_link2 root netem
 tc qdisc del dev r1_link3 root netem
+
+
+interface=$1
+
+IFS=','
+read -ra list <<< "${interface}"
+for intf in "${list[@]}"; do
+    rx_packets=$(ip -s link show ${intf} | grep RX -A1 |tail -1 |awk '{print $2}')
+    rx_dropped=$(ip -s link show ${intf} | grep RX -A1 |tail -1 |awk '{print $4}')
+    tx_packets=$(ip -s link show ${intf} | grep TX -A1 |tail -1 |awk '{print $2}')
+    tx_dropped=$(ip -s link show ${intf} | grep TX -A1 |tail -1 |awk '{print $4}')
+    echo -e "${intf}:"
+    printf "%s %-10s %s %s\n" "RX: recv:" "${rx_packets}" " dropped: " " ${rx_dropped}"
+    printf "%s %-10s %s %s\n" "TX: sent:" "${tx_packets}" " dropped: " " ${tx_dropped}"
+done
